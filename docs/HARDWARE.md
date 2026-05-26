@@ -139,7 +139,70 @@ Once all six inputs respond correctly, install the `atspi` service
 (see `docs/DEVELOPMENT.md`) and proceed with end-to-end testing
 against GenWatch.
 
-## 7. Safety reminders
+## 7. Commissioning checklist (Pi side, after wiring)
+
+Once §5 (install sequence) and §6 (verify reads) are done, follow this
+checklist in order. Each step has an "if this fails" pointer so an
+operator can self-rescue without paging an SRE.
+
+```bash
+# 1. Confirm the package is on the path. Falls under DEVELOPMENT.md
+#    "Production install"; if the venv vs system-wide split matters
+#    here you'll see "command not found" and need to point
+#    systemd/atspi.service ExecStart at the right path.
+which atspi
+atspi --version
+
+# 2. Create the service user BEFORE first systemctl start.
+#    Systemd will fail-fast with "User/Group resolution: 'atspi' not
+#    found" if you skip this — visible in journalctl, not stdout.
+id atspi || sudo useradd --system --no-create-home --shell /usr/sbin/nologin atspi
+
+# 3. Install config; FLIP THE DRIVER from mock to adam.
+#    With driver: mock the service reads from RAM and reports a
+#    constant healthy snapshot — easy to miss because it 'works'.
+sudo mkdir -p /etc/atspi
+sudo cp config.example.yaml /etc/atspi/config.yaml
+sudo sed -i 's/^  driver: mock/  driver: adam/' /etc/atspi/config.yaml
+# also: edit io.adam.host, site.unit_id to site values
+sudo nano /etc/atspi/config.yaml
+
+# 4. Bench-verify EVERY channel before enabling the service.
+#    The bench tool exits 0 only when every step passed.
+atspi-bench --host 192.168.1.251 --port 502 --unit-id 1
+
+# 5. Install + start the systemd unit. StateDirectory= auto-creates
+#    /var/lib/atspi with the right perms; no chown needed.
+sudo cp systemd/atspi.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now atspi
+sudo systemctl status atspi   # should show 'active (running)'
+
+# 6. End-to-end smoke from another host on the OT VLAN.
+#    Should NOT match the mock's hardcoded [0,1,1,0,0,0] snapshot —
+#    if it does, you forgot step 3.
+modpoll -m tcp -a 1 -r 1 -c 6 <pi-ip>
+
+# 7. Verify the unit_id register matches GenWatch's expected_unit_id.
+#    A mismatch makes GenWatch refuse to connect (silent on the wire).
+modpoll -m tcp -a 1 -r 54 -c 1 <pi-ip>   # 0x0035 = site.unit_id
+
+# 8. Enable GenWatch's ATS consumer (ats.enabled: true in its config)
+#    and confirm the dashboard ATS card lights up within ~2 prime
+#    polls (3 s default).
+```
+
+If any of steps 4-7 fail, see `docs/RUNBOOK.md`. Common gotchas:
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `systemctl status` → `code=exited, status=127` | `/usr/local/bin/atspi` doesn't exist (venv install) | Point `ExecStart=` at the venv's atspi binary |
+| `User/Group resolution: 'atspi' not found` | Skipped step 2 | `useradd` command above |
+| modpoll returns `[0, 1, 1, 0, 0, 0]` no matter what the ATS is doing | `driver: mock` still in config | Step 3 sed/nano |
+| modpoll times out | Firewall on Pi (`iptables -L`) or wrong bind (`modbus_server.host`) | Allow 502 in/out; bind to `0.0.0.0` |
+| Sampling loop logs `OSError: ADAM read_coils ... failed: TimeoutError` every cycle | ADAM unreachable or wrong IP | `ping <io.adam.host>` from Pi; check Cat6 |
+
+## 8. Safety reminders
 
 - ATS internals are at 480 V / 600 A. All work inside the cabinet
   requires a qualified electrician with proper PPE and LOTO procedures

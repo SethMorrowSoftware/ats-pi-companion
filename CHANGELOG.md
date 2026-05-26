@@ -9,6 +9,30 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 ## [Unreleased]
 
+### Fixed (commissioning-day robustness)
+
+- `IOAdamDriver` now passes `timeout=0.5` and `retries=1` to
+  `AsyncModbusTcpClient`. pymodbus's defaults (3 s × 3 retries =
+  up to 9 s per operation) would stall the 10 Hz sampling loop on any
+  flaky Ethernet drop, and the service would look wedged to an
+  operator. With these values a hard failure surfaces in ~1 s and the
+  next sampling cycle retries 100 ms later.
+- `config.example.yaml`: prominent banner reminding operators to flip
+  `driver: mock` → `driver: adam` before production deploy. With mock
+  the service reads from RAM and reports a constant healthy snapshot
+  forever — easy to miss because it 'works'.
+- `systemd/atspi.service`: comment now spells out the
+  `User/Group resolution: 'atspi' not found` failure mode and
+  cross-references the commissioning sequence.
+- `docs/HARDWARE.md`: new §7 commissioning checklist with the literal
+  command sequence from "Pi configured" to "GenWatch sees the ATS",
+  plus a symptom-to-fix table for the five most likely first-boot
+  gotchas.
+- `docs/RUNBOOK.md`: §1 notes `modpoll` isn't in Raspbian's base
+  package set (`sudo apt install modbus-cli`); §3(a) distinguishes a
+  transient network blip from a real wiring fault under the new
+  500 ms timeout.
+
 ### Fixed (time-source correctness)
 
 - `ats_pi_uptime_s` (`0x0014`) now derives from `time.monotonic()`, not
