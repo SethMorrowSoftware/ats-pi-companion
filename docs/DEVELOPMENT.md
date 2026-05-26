@@ -41,19 +41,22 @@ modpoll -m tcp -a 1 -r 1 -c 6 127.0.0.1
 # (position=0 utility, normal=1, emergency=1, eng_start=0, mode=0 auto, fault=0)
 ```
 
-To flip mock state from a Python shell:
+### Flipping mock state at runtime
 
-```python
-# In a third terminal
-import requests   # if we add a small HTTP control endpoint to the mock
-# OR directly:
-from atspi.io_mock import mock_global_state  # convention TBD
-mock_global_state.set_normal_available(False)
+Send signals to the running atspi process:
+
+```bash
+# Cycle position: utility → generator → transferring → unknown → utility
+kill -USR1 $(pgrep -f 'atspi --config')
+
+# Toggle normal_available (engine_start_calling mirrors the inverted value,
+# matching how the ASCO actually behaves on utility loss).
+kill -USR2 $(pgrep -f 'atspi --config')
 ```
 
-(The mock driver should expose a simple control interface — REPL, HTTP
-endpoint on localhost, or signal handlers. Choose what's easiest for
-the implementer; document the choice.)
+The signal handlers are only installed when the mock driver is the
+active one (`io.driver: mock` in config). Production runs with
+`io.driver: adam` ignore both signals.
 
 ## Running tests
 

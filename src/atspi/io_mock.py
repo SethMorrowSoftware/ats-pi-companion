@@ -1,9 +1,17 @@
 """Mock I/O driver — in-memory contact state, no hardware required.
 
 Used for development and integration testing without an ADAM-6060.
-State can be flipped programmatically (for unit tests) or via the
-process's stdin (when running interactively — see __main__.py for the
-CLI hook).
+State can be flipped programmatically (for unit tests) or via signals
+sent to the running service:
+
+  - ``SIGUSR1`` cycles the position through utility → generator →
+    transferring → unknown → (back to utility).
+  - ``SIGUSR2`` toggles normal_available; engine_start_calling mirrors
+    the inverted value, matching how the ASCO actually behaves.
+
+The signal handlers are installed inside :meth:`connect` so they're
+only registered when the mock is the active driver running on an
+asyncio event loop.
 
 Defaults represent a healthy steady-state: load on Normal, both sources
 available, AUTO mode, no faults.
@@ -12,10 +20,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 
 from .io_driver import InputSnapshot, OutputState
 
 log = logging.getLogger("atspi.io_mock")
+
+_POSITION_CYCLE = ("utility", "generator", "transferring", "unknown")
 
 
 class IOMockDriver:
@@ -42,12 +53,69 @@ class IOMockDriver:
 
     async def connect(self) -> bool:
         log.info("mock I/O driver connected (no hardware)")
+        self._install_signal_handlers()
         return True
 
     async def close(self) -> None:
         for t in (self._test_release_task, self._bypass_release_task):
             if t is not None:
                 t.cancel()
+        self._remove_signal_handlers()
+
+    # ── Runtime control via signals ──────────────────────────────────
+
+    def _install_signal_handlers(self) -> None:
+        """Wire SIGUSR1 / SIGUSR2 onto the running event loop. Quiet
+        no-op when not on an event loop (most unit tests) or when the
+        platform doesn't support signal handlers (Windows).
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        try:
+            loop.add_signal_handler(signal.SIGUSR1, self.cycle_position)
+            loop.add_signal_handler(signal.SIGUSR2, self.toggle_normal_available)
+        except (NotImplementedError, OSError, ValueError):
+            return
+        log.info(
+            "mock: SIGUSR1 cycles position (utility→generator→transferring→unknown), "
+            "SIGUSR2 toggles normal_available + engine_start"
+        )
+
+    def _remove_signal_handlers(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        for sig in (signal.SIGUSR1, signal.SIGUSR2):
+            try:
+                loop.remove_signal_handler(sig)
+            except (NotImplementedError, OSError, ValueError):
+                pass
+
+    def cycle_position(self) -> None:
+        """Advance position one step around _POSITION_CYCLE. Bound to
+        SIGUSR1 when running on a loop; also directly callable from tests.
+        """
+        try:
+            idx = _POSITION_CYCLE.index(self.position)
+        except ValueError:
+            idx = -1
+        self.position = _POSITION_CYCLE[(idx + 1) % len(_POSITION_CYCLE)]
+        log.info("mock SIGUSR1: position → %s", self.position)
+
+    def toggle_normal_available(self) -> None:
+        """Flip normal_available and mirror the ASCO behaviour where
+        engine_start_calling asserts when utility is lost. Bound to
+        SIGUSR2; also directly callable from tests.
+        """
+        self.normal_available = not self.normal_available
+        self.engine_start_calling = not self.normal_available
+        log.info(
+            "mock SIGUSR2: normal_available=%s engine_start=%s",
+            self.normal_available, self.engine_start_calling,
+        )
 
     async def read_inputs(self) -> InputSnapshot:
         return InputSnapshot(
