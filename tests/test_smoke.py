@@ -5,7 +5,7 @@ import pytest
 
 import atspi
 from atspi.config import Config, load_config
-from atspi.io_driver import IODriver, InputSnapshot, OutputState
+from atspi.io_driver import InputSnapshot, OutputState
 from atspi.io_mock import IOMockDriver
 from atspi.state import RegisterStore
 

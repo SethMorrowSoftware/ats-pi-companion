@@ -58,11 +58,18 @@ the implementer; document the choice.)
 ## Running tests
 
 ```bash
-pytest tests/ -v
+python -m pytest tests/ -v
 ```
 
-The test suite should run entirely without hardware — uses only the
-mock driver.
+The test suite (51 tests) runs entirely without hardware — uses the
+mock driver, an in-memory fake for the ADAM driver, and tmp files for
+persistence. Lint with:
+
+```bash
+python -m ruff check src/ tests/
+```
+
+CI runs both on every push (see `.github/workflows/ci.yml`).
 
 ## Manual integration testing against GenWatch
 
