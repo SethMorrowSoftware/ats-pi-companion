@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 log = logging.getLogger("atspi.persistence")
@@ -27,6 +27,11 @@ class PersistedState:
     transfer_count_lifetime: int = 0
     last_transfer_to_gen_ts: int = 0
     last_retransfer_to_util_ts: int = 0
+    # UTC epoch seconds for every transfer-to-generator event still within
+    # the 24-hour rolling window. ICD §9.3 says this MAY reset on reboot,
+    # but persisting it removes an ops papercut: a service restart for any
+    # unrelated reason no longer wipes the 24h count mid-day.
+    recent_transfer_wallclocks: list[int] = field(default_factory=list)
 
 
 class StateFile:
@@ -42,10 +47,15 @@ class StateFile:
         try:
             with self.path.open() as f:
                 data = json.load(f)
+            raw_wallclocks = data.get("recent_transfer_wallclocks") or []
+            if not isinstance(raw_wallclocks, list):
+                raw_wallclocks = []
+            recent_wallclocks = [int(ts) for ts in raw_wallclocks]
             return PersistedState(
                 transfer_count_lifetime=int(data.get("transfer_count_lifetime", 0)),
                 last_transfer_to_gen_ts=int(data.get("last_transfer_to_gen_ts", 0)),
                 last_retransfer_to_util_ts=int(data.get("last_retransfer_to_util_ts", 0)),
+                recent_transfer_wallclocks=recent_wallclocks,
             )
         except (OSError, json.JSONDecodeError, ValueError, TypeError) as e:
             log.warning(

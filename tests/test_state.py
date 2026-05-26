@@ -73,17 +73,17 @@ def test_retransfer_to_utility_updates_timestamp_not_counter():
 
 def test_24h_count_evicts_old_entries(monkeypatch):
     """Transfers older than 24h drop out of the rolling counter."""
-    fake_mono = [1000.0]
-    monkeypatch.setattr(time, "monotonic", lambda: fake_mono[0])
+    fake_wall = [1_700_000_000]
+    monkeypatch.setattr(time, "time", lambda: fake_wall[0])
 
     store = RegisterStore()
-    # Initial transfer at t=1000
+    # Initial transfer at t=1_700_000_000
     store.apply_input_snapshot(_inputs(position="utility"))
     store.apply_input_snapshot(_inputs(position="generator"))
     assert store.read_register(ADDR_TRANSFER_COUNT_24H + 1) == 1
 
     # 25 hours later, another transfer
-    fake_mono[0] = 1000.0 + 25 * 3600
+    fake_wall[0] += 25 * 3600
     store.apply_input_snapshot(_inputs(position="utility"))
     store.apply_input_snapshot(_inputs(position="generator"))
 
@@ -93,10 +93,53 @@ def test_24h_count_evicts_old_entries(monkeypatch):
     assert store.read_register(ADDR_TRANSFER_COUNT_LIFETIME + 1) == 2
 
 
-def _store_in_auto() -> RegisterStore:
-    """Helper: a RegisterStore that has seen one sampling cycle in AUTO,
-    matching the realistic flow before any client write would arrive.
+def test_24h_count_survives_restart_within_window(tmp_path, monkeypatch):
+    """B7: the 24h sliding-window timestamps persist across restarts so
+    a service restart for an unrelated reason doesn't zero the counter.
     """
+    sf = StateFile(tmp_path / "state.json")
+    fake_wall = [1_700_000_000]
+    monkeypatch.setattr(time, "time", lambda: fake_wall[0])
+
+    s1 = RegisterStore(state_file=sf)
+    # Two transfers within the window.
+    s1.apply_input_snapshot(_inputs(position="utility"))
+    s1.apply_input_snapshot(_inputs(position="generator"))
+    fake_wall[0] += 60
+    s1.apply_input_snapshot(_inputs(position="utility"))
+    s1.apply_input_snapshot(_inputs(position="generator"))
+    assert s1.read_register(ADDR_TRANSFER_COUNT_24H + 1) == 2
+
+    # Simulate restart 1 hour later.
+    fake_wall[0] += 3600
+    s2 = RegisterStore(state_file=sf)
+    assert s2.read_register(ADDR_TRANSFER_COUNT_24H + 1) == 2
+    assert s2.read_register(ADDR_TRANSFER_COUNT_LIFETIME + 1) == 2
+
+
+def test_24h_count_evicts_stale_entries_at_startup(tmp_path, monkeypatch):
+    """If a service is offline >24h, stale entries in the persisted
+    window must be filtered out at load time.
+    """
+    sf = StateFile(tmp_path / "state.json")
+    fake_wall = [1_700_000_000]
+    monkeypatch.setattr(time, "time", lambda: fake_wall[0])
+
+    s1 = RegisterStore(state_file=sf)
+    s1.apply_input_snapshot(_inputs(position="utility"))
+    s1.apply_input_snapshot(_inputs(position="generator"))
+    assert s1.read_register(ADDR_TRANSFER_COUNT_24H + 1) == 1
+
+    # Service down for 30 hours.
+    fake_wall[0] += 30 * 3600
+    s2 = RegisterStore(state_file=sf)
+    # All persisted entries are now stale → 24h count drops to zero.
+    assert s2.read_register(ADDR_TRANSFER_COUNT_24H + 1) == 0
+    # Lifetime still preserved.
+    assert s2.read_register(ADDR_TRANSFER_COUNT_LIFETIME + 1) == 1
+
+
+def test_write_register_returns_command_intent():
     store = RegisterStore()
     store.apply_input_snapshot(_inputs(position="utility"))
     return store
