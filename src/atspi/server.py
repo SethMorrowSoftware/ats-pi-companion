@@ -53,26 +53,68 @@ _ALLOWED_HOLDING_WRITE_ADDRESSES = frozenset([
 _HOLDING_WRITE_FCS = frozenset([0x06, 0x10])
 # FC05 (write single coil), FC15 (write multiple coils).
 _COIL_WRITE_FCS = frozenset([0x05, 0x0F])
+# FC03 (read holding regs), FC04 (read input regs); both serve the same
+# ICD register space. FC23 (read/write multiple) is not implemented.
+_HOLDING_READ_FCS = frozenset([0x03, 0x04])
 
 
 class _GuardedSlaveContext(ModbusSlaveContext):
-    """Slave context that refuses writes outside the four ICD command
-    registers. Returns Modbus exception 0x02 (illegal data address); the ICD
-    specifies 0x03 (illegal data value) for reserved-write rejection, but
-    pymodbus's validate() path triggers 0x02 — practically equivalent since
-    both signal "write rejected" to the client.
+    """Slave context that refuses writes the ICD says must be rejected.
 
-    The ATS-Pi only exposes holding registers, so coil-write FCs (FC05/FC15)
-    are rejected unconditionally.
+    Three classes of rejection:
+
+      * Coil writes (FC05/FC15) — the ATS-Pi exposes no coils; reject
+        unconditionally regardless of address.
+      * Holding writes (FC06/FC16) outside the four ICD command
+        registers (``0x0100``–``0x0103``) — reserved space, read-only
+        identification, and timestamp registers all live outside that
+        band; the ICD requires writes there be rejected.
+      * Holding writes inside the command band but not permitted by the
+        current ``ats_mode`` — ICD §6 mode policy. ``RegisterStore``
+        also latches ``mode_reject_active`` so ``fault_summary`` surfaces
+        the rejection on the next read.
+
+    All three return Modbus exception 0x02 (illegal data address). The
+    ICD prefers 0x03 (illegal data value) for reserved-range rejection
+    and 0x04 (server device failure) for mode rejection, but pymodbus's
+    ``validate()`` hook only emits 0x02. The safety-relevant property
+    (write rejected with a Modbus exception, client knows) holds; the
+    exact code is documented as a known deviation in CHANGELOG.
+
+    Mode enforcement lives here rather than in the data block's
+    ``setValues`` because pymodbus only translates ``validate()=False``
+    into an exception response — raising from ``setValues`` would not
+    yield a clean Modbus error for the client.
     """
+
+    def __init__(self, *args, store: RegisterStore, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._store = store
 
     def validate(self, fc_as_hex, address, count=1):  # noqa: N803 (pymodbus interface)
         if fc_as_hex in _COIL_WRITE_FCS:
             return False
         if fc_as_hex in _HOLDING_WRITE_FCS:
             for offset in range(count):
-                if (address + offset) not in _ALLOWED_HOLDING_WRITE_ADDRESSES:
+                target = address + offset
+                if target not in _ALLOWED_HOLDING_WRITE_ADDRESSES:
                     return False
+                # Mode policy: latches mode_reject_active on rejection.
+                if not self._store.can_write(target):
+                    return False
+            return True
+        if fc_as_hex in _HOLDING_READ_FCS:
+            # ICD §3: ALL reserved holding-register addresses through
+            # 0xFFFF MUST return 0 on read. The default
+            # SequentialDataBlock.validate rejects addresses past the
+            # block's allocated size with exception 0x02; that breaks
+            # GenWatch's reserved-range probes. Accept any read address
+            # — getValues delegates to RegisterStore.read_register which
+            # already returns 0 for unknown addresses.
+            return True
+        # For function codes we don't explicitly handle (coil reads,
+        # diagnostics), fall back to the default behaviour rather than
+        # silently accepting.
         return super().validate(fc_as_hex, address, count)
 
 
@@ -118,7 +160,7 @@ async def start_server(
     task handle so the caller can cancel it during shutdown.
     """
     block = _make_data_block(store, on_read, on_command)
-    slave = _GuardedSlaveContext(hr=block, ir=block)
+    slave = _GuardedSlaveContext(hr=block, ir=block, store=store)
     context = ModbusServerContext(slaves={unit_id: slave}, single=False)
 
     async def _serve():

@@ -87,6 +87,11 @@ FAULT_OUTPUT = 0x0002
 FAULT_MODE_UNKNOWN = 0x0004
 FAULT_CALIBRATION = 0x0008
 
+# ICD §5.1.1: bits 4-15 are RESERVED and MUST be 0 on the wire. A buggy
+# driver that reports stray bits in InputSnapshot.fault_bits must not be
+# able to leak them to GenWatch.
+_FAULT_DEFINED_MASK = FAULT_INPUT | FAULT_OUTPUT | FAULT_MODE_UNKNOWN | FAULT_CALIBRATION
+
 # Bits the orchestrator owns (set/cleared by set_input_fault / set_output_fault).
 # Other bits in fault_summary are sourced from the driver via InputSnapshot.fault_bits.
 _LOCAL_FAULT_MASK = FAULT_INPUT | FAULT_OUTPUT
@@ -303,12 +308,13 @@ class RegisterStore:
             if addr == ADDR_ATS_MODE:
                 return _MODE_TO_VALUE.get(s.ats_mode, 3)
             if addr == ADDR_FAULT_SUMMARY:
-                bits = s.fault_bits & 0xFFFF
+                bits = s.fault_bits
                 # Surface the mode-reject latch as FAULT_INPUT per ICD
                 # §write response contract.
                 if s.mode_reject_active:
                     bits |= FAULT_INPUT
-                return bits
+                # ICD §5.1.1: reserved bits MUST be 0 on the wire.
+                return bits & _FAULT_DEFINED_MASK
 
             # u32 fields, high word at lower address
             if addr == ADDR_LAST_TRANSFER_TS:
@@ -366,6 +372,34 @@ class RegisterStore:
             # RESERVED / unknown → 0 per ICD §5
             return 0
 
+    def can_write(self, addr: int) -> bool:
+        """Pre-validate a holding-register write for the Modbus
+        ``validate()`` hook. Returns ``True`` if a write to ``addr``
+        is allowed under the current mode policy; ``False`` otherwise.
+
+        A ``False`` return latches ``mode_reject_active`` so the
+        next ``fault_summary`` read surfaces the rejection via
+        ``FAULT_INPUT`` (ICD §write response contract). Unknown
+        addresses always return ``False`` — the server already gates
+        unknown writes via ``_ALLOWED_HOLDING_WRITE_ADDRESSES`` and
+        does NOT consult this method, so an unknown-address call here
+        is a logic error in the caller and we choose the safer answer.
+        """
+        allowed_modes = _ALLOWED_MODES_FOR_ADDR.get(addr)
+        if allowed_modes is None:
+            return False
+        with self._lock:
+            mode = self._snap.ats_mode
+        if mode not in allowed_modes:
+            with self._lock:
+                self._snap = replace(self._snap, mode_reject_active=True)
+            log.warning(
+                "write to %#06x rejected: ats_mode=%s, allowed=%s",
+                addr, mode, sorted(allowed_modes),
+            )
+            return False
+        return True
+
     def write_register(self, addr: int, value: int) -> CommandIntent | None:
         """Translate a Modbus write into a driver-level command intent.
 
@@ -376,6 +410,13 @@ class RegisterStore:
         once the next sampling cycle reads the driver's actual output
         state. This keeps the read-back register honest (it reflects
         what the relay actually is, not what we asked for).
+
+        The Modbus server pre-validates mode policy via
+        :meth:`can_write`, so under the production path a ``None``
+        return from here is always value-validation failure. The
+        in-method mode check is retained as defence-in-depth for
+        callers that bypass ``can_write`` (unit tests, future
+        non-Modbus front-ends).
         """
         # Step 1: is this a known command register at all?
         allowed_modes = _ALLOWED_MODES_FOR_ADDR.get(addr)

@@ -83,8 +83,14 @@ def test_set_values_multiple_addresses():
 
 def _make_guarded():
     store = RegisterStore()
+    # Seed AUTO mode so command-register writes pass the mode gate; tests
+    # that exercise mode policy directly target RegisterStore.can_write.
+    store.apply_input_snapshot(InputSnapshot(
+        position="utility", normal_available=True, emergency_available=True,
+        engine_start_calling=False, ats_mode="auto", fault_bits=0,
+    ))
     block = _make_data_block(store, on_read=None, on_command=None)
-    return _GuardedSlaveContext(hr=block, ir=block)
+    return _GuardedSlaveContext(hr=block, ir=block, store=store)
 
 
 @pytest.mark.parametrize(
@@ -151,6 +157,13 @@ async def test_end_to_end_write_to_reserved_returns_exception(unused_tcp_port):
     from pymodbus.client import AsyncModbusTcpClient
 
     store = RegisterStore(unit_id=23)
+    # Seed AUTO mode so the cmd_inhibit write below passes the validate()
+    # mode gate (otherwise it would correctly reject as a mode violation,
+    # masking the reserved-address behaviour we're trying to exercise).
+    store.apply_input_snapshot(InputSnapshot(
+        position="utility", normal_available=True, emergency_available=True,
+        engine_start_calling=False, ats_mode="auto", fault_bits=0,
+    ))
     task = await start_server(
         host="127.0.0.1", port=unused_tcp_port, unit_id=1, store=store,
     )
