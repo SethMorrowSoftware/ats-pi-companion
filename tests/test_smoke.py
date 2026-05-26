@@ -1,6 +1,8 @@
 """Smoke tests — sanity checks that everything imports and basic plumbing works."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 import atspi
@@ -93,3 +95,28 @@ def test_register_store_reserved_addresses_read_zero():
     assert store.read_register(0x0050) == 0
     assert store.read_register(0x00FF) == 0
     assert store.read_register(0x0200) == 0
+
+
+@pytest.mark.asyncio
+async def test_mock_pulse_re_trigger_during_active_is_ignored():
+    """ICD §6: mock driver must also enforce pulse idempotency."""
+    d = IOMockDriver()
+    await d.connect()
+    await d.drive_outputs(test_pulse_ms=1500)
+    out_first = await d.read_output_state()
+    assert out_first.test_active is True
+    # Re-trigger mid-pulse — must not extend or restart.
+    await d.drive_outputs(test_pulse_ms=1500)
+    # Wait less than the original pulse but past where a re-trigger would push it.
+    await asyncio.sleep(0.6)
+    # Pulse is still in its original window.
+    out_mid = await d.read_output_state()
+    assert out_mid.test_active is True
+    # After the original pulse window completes, it must self-clear.
+    await asyncio.sleep(1.2)
+    out_after = await d.read_output_state()
+    assert out_after.test_active is False, (
+        "Original pulse must release on its original schedule, "
+        "not be extended by the second drive_outputs call"
+    )
+    await d.close()
