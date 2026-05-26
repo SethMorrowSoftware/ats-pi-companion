@@ -39,3 +39,13 @@ site:
 # The transfer_count_lifetime counter MUST survive reboots per ICD §9.3.
 persistence:
   state_file: /var/lib/atspi/state.json
+
+# ─── Health endpoint (optional) ───────────────────────────────────────────
+# Localhost-bound JSON status endpoint at GET /health. Off by default;
+# opt-in for sites that want external monitoring (Prometheus scraper,
+# cron health-check, dashboard) without speaking Modbus.
+#
+# health:
+#   enabled: true
+#   host: 127.0.0.1
+#   port: 8001

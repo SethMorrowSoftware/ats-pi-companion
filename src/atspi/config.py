@@ -44,11 +44,22 @@ class PersistenceCfg:
 
 
 @dataclass
+class HealthCfg:
+    # Localhost-bound JSON status endpoint. Off by default so the default
+    # production install has no extra listening port; opt-in for sites
+    # that want external monitoring without speaking Modbus.
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 8001
+
+
+@dataclass
 class Config:
     modbus_server: ModbusServerCfg = field(default_factory=ModbusServerCfg)
     io: IOCfg = field(default_factory=IOCfg)
     site: SiteCfg = field(default_factory=SiteCfg)
     persistence: PersistenceCfg = field(default_factory=PersistenceCfg)
+    health: HealthCfg = field(default_factory=HealthCfg)
 
 
 def _coerce(cls, data: dict[str, Any]):

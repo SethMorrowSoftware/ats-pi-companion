@@ -123,6 +123,17 @@ async def _amain(args: argparse.Namespace) -> int:
         on_command=on_command,
     )
 
+    health_server = None
+    if cfg.health.enabled:
+        from .health import start_health_server
+        try:
+            health_server = start_health_server(
+                cfg.health.host, cfg.health.port, store, watchdog,
+            )
+        except OSError as e:
+            log.error("health endpoint failed to start on %s:%d: %s",
+                      cfg.health.host, cfg.health.port, e)
+
     stop = asyncio.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
@@ -132,6 +143,8 @@ async def _amain(args: argparse.Namespace) -> int:
     await stop.wait()
 
     log.info("atspi shutting down")
+    if health_server is not None:
+        health_server.stop()
     tasks = (sample_task, watchdog_task, notify_task, server_task)
     for t in tasks:
         if t is not None:
