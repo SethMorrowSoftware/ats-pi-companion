@@ -11,6 +11,14 @@ from typing import Any
 import yaml
 
 
+class ConfigError(ValueError):
+    """Raised on structural config problems (unknown keys, bad driver name).
+
+    Fail-fast on a typo'd config key is the whole point — silently dropping
+    keys is the production hazard we're protecting against.
+    """
+
+
 @dataclass
 class ModbusServerCfg:
     host: str = "0.0.0.0"
@@ -51,15 +59,25 @@ class Config:
     persistence: PersistenceCfg = field(default_factory=PersistenceCfg)
 
 
-def _coerce(cls, data: dict[str, Any]):
-    """Best-effort dict → dataclass, recursing one level for nested types."""
+def _coerce(cls, data: dict[str, Any], _path: str = ""):
+    """Dict → dataclass with strict unknown-key checking.
+
+    A typo'd key in production silently fed defaults to the running service —
+    by the time anyone noticed, the wrong port / unit_id / driver had been
+    used for hours. Raise on unknowns instead.
+    """
     out = cls()
     for k, v in (data or {}).items():
         if not hasattr(out, k):
-            continue
+            known = sorted(out.__dataclass_fields__.keys())
+            location = f"{_path}.{k}" if _path else k
+            raise ConfigError(
+                f"unknown config key {location!r}; valid keys at this level: {known}"
+            )
         attr = getattr(out, k)
         if hasattr(attr, "__dataclass_fields__") and isinstance(v, dict):
-            setattr(out, k, _coerce(type(attr), v))
+            child_path = f"{_path}.{k}" if _path else k
+            setattr(out, k, _coerce(type(attr), v, _path=child_path))
         else:
             setattr(out, k, v)
     return out
@@ -71,4 +89,6 @@ def load_config(path: str | Path) -> Config:
         raise FileNotFoundError(f"config not found: {p}")
     with p.open() as f:
         raw = yaml.safe_load(f) or {}
+    if not isinstance(raw, dict):
+        raise ConfigError(f"config root must be a mapping, got {type(raw).__name__}")
     return _coerce(Config, raw)

@@ -65,7 +65,15 @@ class StateFile:
             return PersistedState()
 
     def save(self, state: PersistedState) -> None:
-        """Write atomically. Creates the parent directory if needed."""
+        """Write atomically. Creates the parent directory if needed.
+
+        Durability against power loss requires two fsyncs: one for the
+        temp file (to flush its contents to disk before rename) and one
+        for the parent directory (so the rename entry itself reaches
+        disk). Without the directory fsync, a power loss right after
+        rename() can leave the old file intact even though we observed
+        the rename "succeed".
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Same directory as the target so os.replace is a true rename
         # within one filesystem (atomic).
@@ -80,6 +88,21 @@ class StateFile:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, self.path)
+            # Flush the directory entry so the rename survives power loss.
+            try:
+                dir_fd = os.open(str(self.path.parent), os.O_RDONLY)
+            except OSError:
+                # Some filesystems (e.g. FAT) don't support directory open
+                # for fsync; the file contents are still durable.
+                return
+            try:
+                os.fsync(dir_fd)
+            except OSError:
+                # Some filesystems don't support directory fsync either;
+                # accept the slight durability gap rather than crashing.
+                pass
+            finally:
+                os.close(dir_fd)
         except Exception:
             try:
                 os.unlink(tmp_path)

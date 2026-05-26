@@ -6,10 +6,20 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel an in-flight CI run when a new push lands on the same branch/PR.
+# Saves wasted compute on rapid pushes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
 
@@ -32,3 +42,24 @@ jobs:
 
       - name: Test
         run: python -m pytest tests/ -v
+
+  audit:
+    # Dependency vulnerability scan — informational, doesn't gate merges.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit
+        run: |
+          pip install -e .
+          pip-audit --strict --desc

@@ -11,9 +11,17 @@ Wants=network-online.target
 Type=notify
 NotifyAccess=main
 WatchdogSec=60
+TimeoutStartSec=30
 
+# Requires the 'atspi' system user to exist. Create once at install time:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin atspi
 User=atspi
 Group=atspi
+
+# StateDirectory= auto-creates /var/lib/atspi (mode 0750, owned by User/Group)
+# on first start. No manual chown needed; survives uninstall/reinstall cycles.
+StateDirectory=atspi
+StateDirectoryMode=0750
 
 # The 'atspi' entry point is installed by pip into the same prefix
 # Python is using. Hard-coding /usr/local/bin/atspi assumes a system-
@@ -24,18 +32,31 @@ ExecStart=/usr/local/bin/atspi --config /etc/atspi/config.yaml
 Restart=on-failure
 RestartSec=5
 
-# Sandboxing — minimal privileges
+# Sandboxing — minimal privileges. The goal is that even a code-execution
+# compromise in pymodbus can't escape the unit, can't write outside the
+# state dir, can't tamper with the clock or namespaces, and can't reach
+# anything outside the configured Modbus endpoints on the local network.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/atspi
 ProtectKernelTunables=true
 ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
 
 # Logging — journal-friendly
 StandardOutput=journal

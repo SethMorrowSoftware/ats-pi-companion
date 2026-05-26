@@ -12,6 +12,7 @@ to the side under the lock and assigning the full snapshot at once.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -64,6 +65,16 @@ _POSITION_TO_VALUE = {
 }
 _MODE_TO_VALUE = {"auto": 0, "manual": 1, "test": 2, "unknown": 3}
 
+# Per ICD §6, each command has a permitted-mode set. Writes from a non-
+# permitted mode are rejected (and the rejection latch sets FAULT_INPUT
+# until the next valid command clears it).
+_ALLOWED_MODES_FOR_ADDR: dict[int, frozenset[str]] = {
+    ADDR_CMD_TEST: frozenset(["auto"]),
+    ADDR_CMD_INHIBIT: frozenset(["auto", "manual"]),
+    ADDR_CMD_FORCE_TRANSFER: frozenset(["auto"]),
+    ADDR_CMD_BYPASS_DELAY: frozenset(["auto"]),
+}
+
 # Default pulse duration when a Modbus client sets cmd_test or cmd_bypass_delay
 # without specifying one. Sits in the middle of the ICD §6.1 range.
 DEFAULT_PULSE_MS = 750
@@ -75,6 +86,10 @@ FAULT_INPUT = 0x0001
 FAULT_OUTPUT = 0x0002
 FAULT_MODE_UNKNOWN = 0x0004
 FAULT_CALIBRATION = 0x0008
+
+# Bits the orchestrator owns (set/cleared by set_input_fault / set_output_fault).
+# Other bits in fault_summary are sourced from the driver via InputSnapshot.fault_bits.
+_LOCAL_FAULT_MASK = FAULT_INPUT | FAULT_OUTPUT
 
 
 @dataclass(frozen=True)
@@ -98,6 +113,11 @@ class _StateSnapshot:
     cmd_inhibit_active: bool = False
     cmd_force_transfer_active: bool = False
     cmd_bypass_delay_active: bool = False
+
+    # ICD §write response contract: latched when a mode-restricted write is
+    # rejected; cleared by the next valid command. Surfaces in fault_summary
+    # as FAULT_INPUT until cleared.
+    mode_reject_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -191,13 +211,23 @@ class RegisterStore:
 
             self._evict_old_transfers(now_wall)
 
+            # FAULT_INPUT and FAULT_OUTPUT are owned by the sampling-loop and
+            # command-dispatch paths via set_input_fault / set_output_fault.
+            # Other fault bits (MODE_UNKNOWN, CALIBRATION) come from the driver.
+            # Without this merge, a successful read would clobber OUTPUT_FAULT
+            # set by a recently-failed drive_outputs call.
+            merged_fault_bits = (
+                (prev.fault_bits & _LOCAL_FAULT_MASK)
+                | (inputs.fault_bits & ~_LOCAL_FAULT_MASK)
+            ) & 0xFFFF
+
             self._snap = _StateSnapshot(
                 position=inputs.position,
                 normal_available=inputs.normal_available,
                 emergency_available=inputs.emergency_available,
                 engine_start_calling=inputs.engine_start_calling,
                 ats_mode=inputs.ats_mode,
-                fault_bits=inputs.fault_bits,
+                fault_bits=merged_fault_bits,
                 last_transfer_to_gen_ts=new_last_to_gen,
                 last_retransfer_to_util_ts=new_last_to_util,
                 transfer_count_lifetime=new_lifetime,
@@ -206,6 +236,10 @@ class RegisterStore:
                 cmd_inhibit_active=prev.cmd_inhibit_active,
                 cmd_force_transfer_active=prev.cmd_force_transfer_active,
                 cmd_bypass_delay_active=prev.cmd_bypass_delay_active,
+                # The mode-reject latch lives across sampling cycles — only
+                # the next accepted command clears it (ICD §write response
+                # contract).
+                mode_reject_active=prev.mode_reject_active,
             )
 
         if persist and self._state_file is not None:
@@ -269,7 +303,12 @@ class RegisterStore:
             if addr == ADDR_ATS_MODE:
                 return _MODE_TO_VALUE.get(s.ats_mode, 3)
             if addr == ADDR_FAULT_SUMMARY:
-                return s.fault_bits & 0xFFFF
+                bits = s.fault_bits & 0xFFFF
+                # Surface the mode-reject latch as FAULT_INPUT per ICD
+                # §write response contract.
+                if s.mode_reject_active:
+                    bits |= FAULT_INPUT
+                return bits
 
             # u32 fields, high word at lower address
             if addr == ADDR_LAST_TRANSFER_TS:
@@ -332,20 +371,47 @@ class RegisterStore:
 
         Returns the :class:`CommandIntent` the server layer should
         dispatch to the I/O driver, or ``None`` if the write is
-        unrecognized. The store does NOT mutate read-back state itself —
-        that happens once the next sampling cycle reads the driver's
-        actual output state. This keeps the read-back register honest
-        (it reflects what the relay actually is, not what we asked for).
+        unrecognized, mode-restricted, or has an invalid value. The
+        store does NOT mutate read-back state itself — that happens
+        once the next sampling cycle reads the driver's actual output
+        state. This keeps the read-back register honest (it reflects
+        what the relay actually is, not what we asked for).
         """
+        # Step 1: is this a known command register at all?
+        allowed_modes = _ALLOWED_MODES_FOR_ADDR.get(addr)
+        if allowed_modes is None:
+            return None
+
+        # Step 2: per ICD §6, enforce the mode-permission policy. A reject
+        # latches FAULT_INPUT until cleared by the next accepted command.
+        with self._lock:
+            mode = self._snap.ats_mode
+        if mode not in allowed_modes:
+            with self._lock:
+                self._snap = replace(self._snap, mode_reject_active=True)
+            log.warning(
+                "write to %#06x rejected: ats_mode=%s, allowed=%s",
+                addr, mode, sorted(allowed_modes),
+            )
+            return None
+
+        # Step 3: value validation + intent construction.
+        intent: CommandIntent | None = None
         if addr == ADDR_CMD_TEST and value == 0x0001:
-            return CommandIntent(test_pulse_ms=DEFAULT_PULSE_MS)
-        if addr == ADDR_CMD_INHIBIT and value in (0x0000, 0x0001):
-            return CommandIntent(inhibit=value == 0x0001)
-        if addr == ADDR_CMD_FORCE_TRANSFER and value in (0x0000, 0x0001):
-            return CommandIntent(force_transfer=value == 0x0001)
-        if addr == ADDR_CMD_BYPASS_DELAY and value == 0x0001:
-            return CommandIntent(bypass_delay_pulse_ms=DEFAULT_PULSE_MS)
-        return None
+            intent = CommandIntent(test_pulse_ms=DEFAULT_PULSE_MS)
+        elif addr == ADDR_CMD_INHIBIT and value in (0x0000, 0x0001):
+            intent = CommandIntent(inhibit=value == 0x0001)
+        elif addr == ADDR_CMD_FORCE_TRANSFER and value in (0x0000, 0x0001):
+            intent = CommandIntent(force_transfer=value == 0x0001)
+        elif addr == ADDR_CMD_BYPASS_DELAY and value == 0x0001:
+            intent = CommandIntent(bypass_delay_pulse_ms=DEFAULT_PULSE_MS)
+
+        if intent is not None:
+            # An accepted command clears the mode-reject latch (ICD).
+            with self._lock:
+                if self._snap.mode_reject_active:
+                    self._snap = replace(self._snap, mode_reject_active=False)
+        return intent
 
     # ─── Internal helpers ─────────────────────────────────────────────
 
@@ -356,6 +422,13 @@ class RegisterStore:
 
     def _persist_async_safe(self) -> None:
         """Snapshot persisted fields under the lock, then write outside.
+
+        When running on an asyncio event loop (the production case), the
+        actual file write (including fsync, which can stall 50–200 ms on
+        a microSD) is offloaded to the loop's default executor so the
+        10 Hz sampling loop is not blocked. Callers from a synchronous
+        context (unit tests) get a synchronous save.
+
         Catches I/O errors so a flaky disk never crashes the service.
         """
         with self._lock:
@@ -365,6 +438,14 @@ class RegisterStore:
                 last_retransfer_to_util_ts=self._snap.last_retransfer_to_util_ts,
                 recent_transfer_wallclocks=list(self._transfer_timestamps),
             )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._save_blocking(persisted)
+            return
+        loop.run_in_executor(None, self._save_blocking, persisted)
+
+    def _save_blocking(self, persisted: PersistedState) -> None:
         try:
             self._state_file.save(persisted)
         except OSError as e:

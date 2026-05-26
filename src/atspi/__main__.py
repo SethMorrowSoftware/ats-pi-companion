@@ -60,6 +60,13 @@ async def _sampling_loop(driver: IODriver, store: RegisterStore) -> None:
             store.apply_input_snapshot(inputs)
             store.apply_output_state(outputs)
             store.set_input_fault(False)
+            # Stuck-relay detection: compare actual driver state against
+            # the last commanded state. The driver enforces its own
+            # settling window so a write that hasn't physically actuated
+            # yet isn't flagged. OUTPUT_FAULT stays set until cleared by
+            # the next successful drive_outputs() in _dispatch_command.
+            if not driver.check_output_consistency(outputs):
+                store.set_output_fault(True)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
@@ -86,11 +93,13 @@ async def _dispatch_command(driver: IODriver, store: RegisterStore, intent: Comm
 
 
 async def _amain(args: argparse.Namespace) -> int:
-    cfg = load_config(args.config)
+    # Configure logging FIRST so config-load errors and any messages from
+    # driver/store construction land in the right place.
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
+    cfg = load_config(args.config)
     log.info("atspi v%s starting (unit_id=%d)", __version__, cfg.site.unit_id)
 
     driver = _build_io_driver(cfg)
@@ -127,11 +136,21 @@ async def _amain(args: argparse.Namespace) -> int:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
 
+    # Tasks that MUST run for the service to be operational. If any of these
+    # exits — for any reason — the service is degraded and systemd should
+    # restart us. The notify task is excluded: it returns cleanly when not
+    # under systemd, which is normal.
+    critical_tasks: list[asyncio.Task] = [sample_task, watchdog_task, server_task]
+
     notify_ready()
     log.info("atspi is running — Ctrl-C to stop")
-    await stop.wait()
 
-    log.info("atspi shutting down")
+    reason = await _wait_for_shutdown_or_failure(stop, critical_tasks)
+    if reason == "shutdown":
+        log.info("atspi shutting down")
+    else:
+        log.error("atspi shutting down due to failure of critical task: %s", reason)
+
     tasks = (sample_task, watchdog_task, notify_task, server_task)
     for t in tasks:
         if t is not None:
@@ -144,7 +163,44 @@ async def _amain(args: argparse.Namespace) -> int:
         except (asyncio.CancelledError, Exception):
             pass
     await driver.close()
-    return 0
+    # Non-zero exit code on critical-task failure so systemd's Restart=on-failure
+    # kicks in immediately rather than waiting for the WatchdogSec timeout.
+    return 0 if reason == "shutdown" else 1
+
+
+async def _wait_for_shutdown_or_failure(
+    stop: asyncio.Event,
+    critical_tasks: list[asyncio.Task],
+) -> str:
+    """Return ``'shutdown'`` when the stop event fires; otherwise return the
+    name of the first critical task to exit. Either outcome means the main
+    loop should tear down.
+    """
+    stop_task = asyncio.create_task(stop.wait(), name="stop-waiter")
+    try:
+        done, _pending = await asyncio.wait(
+            {stop_task, *critical_tasks},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    finally:
+        if not stop_task.done():
+            stop_task.cancel()
+
+    # Prefer reporting a dead critical task over a normal shutdown signal,
+    # since the failure is the more interesting cause.
+    for t in done:
+        if t is stop_task:
+            continue
+        try:
+            t.result()
+            log.error("critical task %s exited cleanly (expected to run forever)", t.get_name())
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("critical task %s died", t.get_name())
+        return t.get_name()
+
+    return "shutdown"
 
 
 def main() -> None:
