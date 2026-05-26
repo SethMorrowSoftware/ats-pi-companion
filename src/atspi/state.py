@@ -65,6 +65,16 @@ _POSITION_TO_VALUE = {
 }
 _MODE_TO_VALUE = {"auto": 0, "manual": 1, "test": 2, "unknown": 3}
 
+# Per ICD §6, each command has a permitted-mode set. Writes from a non-
+# permitted mode are rejected (and the rejection latch sets FAULT_INPUT
+# until the next valid command clears it).
+_ALLOWED_MODES_FOR_ADDR: dict[int, frozenset[str]] = {
+    ADDR_CMD_TEST: frozenset(["auto"]),
+    ADDR_CMD_INHIBIT: frozenset(["auto", "manual"]),
+    ADDR_CMD_FORCE_TRANSFER: frozenset(["auto"]),
+    ADDR_CMD_BYPASS_DELAY: frozenset(["auto"]),
+}
+
 # Default pulse duration when a Modbus client sets cmd_test or cmd_bypass_delay
 # without specifying one. Sits in the middle of the ICD §6.1 range.
 DEFAULT_PULSE_MS = 750
@@ -103,6 +113,11 @@ class _StateSnapshot:
     cmd_inhibit_active: bool = False
     cmd_force_transfer_active: bool = False
     cmd_bypass_delay_active: bool = False
+
+    # ICD §write response contract: latched when a mode-restricted write is
+    # rejected; cleared by the next valid command. Surfaces in fault_summary
+    # as FAULT_INPUT until cleared.
+    mode_reject_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -209,6 +224,10 @@ class RegisterStore:
                 cmd_inhibit_active=prev.cmd_inhibit_active,
                 cmd_force_transfer_active=prev.cmd_force_transfer_active,
                 cmd_bypass_delay_active=prev.cmd_bypass_delay_active,
+                # The mode-reject latch lives across sampling cycles — only
+                # the next accepted command clears it (ICD §write response
+                # contract).
+                mode_reject_active=prev.mode_reject_active,
             )
 
         if persist and self._state_file is not None:
@@ -272,7 +291,12 @@ class RegisterStore:
             if addr == ADDR_ATS_MODE:
                 return _MODE_TO_VALUE.get(s.ats_mode, 3)
             if addr == ADDR_FAULT_SUMMARY:
-                return s.fault_bits & 0xFFFF
+                bits = s.fault_bits & 0xFFFF
+                # Surface the mode-reject latch as FAULT_INPUT per ICD
+                # §write response contract.
+                if s.mode_reject_active:
+                    bits |= FAULT_INPUT
+                return bits
 
             # u32 fields, high word at lower address
             if addr == ADDR_LAST_TRANSFER_TS:
@@ -335,20 +359,47 @@ class RegisterStore:
 
         Returns the :class:`CommandIntent` the server layer should
         dispatch to the I/O driver, or ``None`` if the write is
-        unrecognized. The store does NOT mutate read-back state itself —
-        that happens once the next sampling cycle reads the driver's
-        actual output state. This keeps the read-back register honest
-        (it reflects what the relay actually is, not what we asked for).
+        unrecognized, mode-restricted, or has an invalid value. The
+        store does NOT mutate read-back state itself — that happens
+        once the next sampling cycle reads the driver's actual output
+        state. This keeps the read-back register honest (it reflects
+        what the relay actually is, not what we asked for).
         """
+        # Step 1: is this a known command register at all?
+        allowed_modes = _ALLOWED_MODES_FOR_ADDR.get(addr)
+        if allowed_modes is None:
+            return None
+
+        # Step 2: per ICD §6, enforce the mode-permission policy. A reject
+        # latches FAULT_INPUT until cleared by the next accepted command.
+        with self._lock:
+            mode = self._snap.ats_mode
+        if mode not in allowed_modes:
+            with self._lock:
+                self._snap = replace(self._snap, mode_reject_active=True)
+            log.warning(
+                "write to %#06x rejected: ats_mode=%s, allowed=%s",
+                addr, mode, sorted(allowed_modes),
+            )
+            return None
+
+        # Step 3: value validation + intent construction.
+        intent: CommandIntent | None = None
         if addr == ADDR_CMD_TEST and value == 0x0001:
-            return CommandIntent(test_pulse_ms=DEFAULT_PULSE_MS)
-        if addr == ADDR_CMD_INHIBIT and value in (0x0000, 0x0001):
-            return CommandIntent(inhibit=value == 0x0001)
-        if addr == ADDR_CMD_FORCE_TRANSFER and value in (0x0000, 0x0001):
-            return CommandIntent(force_transfer=value == 0x0001)
-        if addr == ADDR_CMD_BYPASS_DELAY and value == 0x0001:
-            return CommandIntent(bypass_delay_pulse_ms=DEFAULT_PULSE_MS)
-        return None
+            intent = CommandIntent(test_pulse_ms=DEFAULT_PULSE_MS)
+        elif addr == ADDR_CMD_INHIBIT and value in (0x0000, 0x0001):
+            intent = CommandIntent(inhibit=value == 0x0001)
+        elif addr == ADDR_CMD_FORCE_TRANSFER and value in (0x0000, 0x0001):
+            intent = CommandIntent(force_transfer=value == 0x0001)
+        elif addr == ADDR_CMD_BYPASS_DELAY and value == 0x0001:
+            intent = CommandIntent(bypass_delay_pulse_ms=DEFAULT_PULSE_MS)
+
+        if intent is not None:
+            # An accepted command clears the mode-reject latch (ICD).
+            with self._lock:
+                if self._snap.mode_reject_active:
+                    self._snap = replace(self._snap, mode_reject_active=False)
+        return intent
 
     # ─── Internal helpers ─────────────────────────────────────────────
 
