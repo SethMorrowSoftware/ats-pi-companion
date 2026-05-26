@@ -7,6 +7,8 @@ itself is documented in docs/SPEC.md §8 phase E.
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import pytest
@@ -26,6 +28,18 @@ from atspi.io_adam import (
     DO_TEST,
     IOAdamDriver,
 )
+
+
+async def _wait_for(predicate: Callable[[], bool], timeout: float = 2.0) -> None:
+    """Poll predicate at 20 ms intervals until it returns truthy or timeout
+    expires. Replaces fixed-sleep waits that became flaky on slow CI runners.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"predicate did not become true within {timeout}s")
 
 
 @dataclass
@@ -147,17 +161,15 @@ async def test_drive_outputs_test_pulse_clamps_and_self_clears(driver):
     await driver.drive_outputs(test_pulse_ms=100)
     assert (DO_COIL_BASE + DO_TEST, True) in fake.writes
 
-    # Wait for the release to fire (clamped to 500 ms).
-    await asyncio.sleep(0.7)
-    assert (DO_COIL_BASE + DO_TEST, False) in fake.writes
+    # Poll for the release write (driver clamps to 500 ms min).
+    await _wait_for(lambda: (DO_COIL_BASE + DO_TEST, False) in fake.writes)
 
 
 async def test_drive_outputs_bypass_pulse_self_clears(driver):
     fake = driver._client  # noqa: SLF001
     await driver.drive_outputs(bypass_delay_pulse_ms=500)
     assert (DO_COIL_BASE + DO_BYPASS_DELAY, True) in fake.writes
-    await asyncio.sleep(0.7)
-    assert (DO_COIL_BASE + DO_BYPASS_DELAY, False) in fake.writes
+    await _wait_for(lambda: (DO_COIL_BASE + DO_BYPASS_DELAY, False) in fake.writes)
 
 
 async def test_read_output_state_decodes_bits(driver):
