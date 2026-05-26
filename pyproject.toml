@@ -27,7 +27,7 @@ dependencies = [
     # ~= pins to 3.7.x patch range; 3.7.4 is what we test against. Bumping
     # to a new pymodbus minor needs explicit testing because their API has
     # broken between minors historically.
-    "pymodbus~=3.7.4",
+    "pymodbus>=3.7.4,<3.14.0",
     "PyYAML>=6.0",
 ]
 
