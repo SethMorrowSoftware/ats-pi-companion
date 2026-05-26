@@ -76,6 +76,10 @@ FAULT_OUTPUT = 0x0002
 FAULT_MODE_UNKNOWN = 0x0004
 FAULT_CALIBRATION = 0x0008
 
+# Bits the orchestrator owns (set/cleared by set_input_fault / set_output_fault).
+# Other bits in fault_summary are sourced from the driver via InputSnapshot.fault_bits.
+_LOCAL_FAULT_MASK = FAULT_INPUT | FAULT_OUTPUT
+
 
 @dataclass(frozen=True)
 class _StateSnapshot:
@@ -179,13 +183,23 @@ class RegisterStore:
 
             self._evict_old_transfers(now_mono)
 
+            # FAULT_INPUT and FAULT_OUTPUT are owned by the sampling-loop and
+            # command-dispatch paths via set_input_fault / set_output_fault.
+            # Other fault bits (MODE_UNKNOWN, CALIBRATION) come from the driver.
+            # Without this merge, a successful read would clobber OUTPUT_FAULT
+            # set by a recently-failed drive_outputs call.
+            merged_fault_bits = (
+                (prev.fault_bits & _LOCAL_FAULT_MASK)
+                | (inputs.fault_bits & ~_LOCAL_FAULT_MASK)
+            ) & 0xFFFF
+
             self._snap = _StateSnapshot(
                 position=inputs.position,
                 normal_available=inputs.normal_available,
                 emergency_available=inputs.emergency_available,
                 engine_start_calling=inputs.engine_start_calling,
                 ats_mode=inputs.ats_mode,
-                fault_bits=inputs.fault_bits,
+                fault_bits=merged_fault_bits,
                 last_transfer_to_gen_ts=new_last_to_gen,
                 last_retransfer_to_util_ts=new_last_to_util,
                 transfer_count_lifetime=new_lifetime,
