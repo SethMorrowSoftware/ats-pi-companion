@@ -12,9 +12,9 @@ license = {text = "MIT"}
 authors = [
     {name = "Seth Morrow Software"},
 ]
-keywords = ["modbus", "asco", "ats", "generator", "scada"]
+keywords = ["modbus", "asco", "ats", "generator", "scada", "raspberry-pi"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Manufacturing",
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
@@ -24,7 +24,10 @@ classifiers = [
 ]
 
 dependencies = [
-    "pymodbus==3.7.4",
+    # ~= pins to 3.7.x patch range; 3.7.4 is what we test against. Bumping
+    # to a new pymodbus minor needs explicit testing because their API has
+    # broken between minors historically.
+    "pymodbus~=3.7.4",
     "PyYAML>=6.0",
 ]
 
@@ -40,6 +43,7 @@ atspi = "atspi.__main__:main"
 
 [project.urls]
 "Homepage" = "https://github.com/SethMorrowSoftware/ats-pi-companion"
+"Issues" = "https://github.com/SethMorrowSoftware/ats-pi-companion/issues"
 "ICD" = "https://github.com/SethMorrowSoftware/GenWatch/blob/main/docs/integrations/ats-pi-icd.md"
 "GenWatch" = "https://github.com/SethMorrowSoftware/GenWatch"
 

@@ -111,7 +111,7 @@ What's done:
 - Persistence for `transfer_count_lifetime` (atomic JSON file)
 - 24h sliding-window transfer counter
 - systemd `Type=notify` with watchdog ping (60s)
-- 51 unit tests, ruff-clean, CI on every PR
+- Full unit test suite, ruff-clean, CI on every PR
 
 The companion **GenWatch consumer** for this service is already
 shipped (`ats.enabled: true` in GenWatch's config). It will fall back

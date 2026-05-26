@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 
 from pymodbus.datastore import (
@@ -30,6 +31,11 @@ from .state import (
 )
 
 log = logging.getLogger("atspi.server")
+
+# Cap on how long start_server() waits for the listening socket to come up.
+# pymodbus binds within a few ms locally; 5 s is generous headroom for slow CI.
+_BIND_TIMEOUT_S = 5.0
+_BIND_POLL_INTERVAL_S = 0.02
 
 
 # Per ICD §5, writes are only allowed to the four command registers in the
@@ -127,6 +133,38 @@ async def start_server(
 
     log.info("Modbus TCP server starting on %s:%d (unit_id=%d)", host, port, unit_id)
     task = asyncio.create_task(_serve(), name="modbus-server")
-    # Give the server a moment to bind
-    await asyncio.sleep(0.1)
+    await _wait_until_bound(host, port, task)
     return task
+
+
+async def _wait_until_bound(host: str, port: int, server_task: asyncio.Task) -> None:
+    """Block until the listening socket accepts a TCP connection.
+
+    Replaces a fixed asyncio.sleep(0.1) which was racy under load and on
+    slow CI runners — sometimes start_server returned while pymodbus was
+    still mid-bind and the first client got connection-refused.
+    """
+    probe_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    deadline = time.monotonic() + _BIND_TIMEOUT_S
+    last_err: BaseException | None = None
+    while time.monotonic() < deadline:
+        if server_task.done():
+            # Server died before binding — surface the underlying error.
+            server_task.result()
+            raise RuntimeError("Modbus server task exited before binding")
+        try:
+            _r, w = await asyncio.open_connection(probe_host, port)
+        except (ConnectionRefusedError, OSError) as e:
+            last_err = e
+            await asyncio.sleep(_BIND_POLL_INTERVAL_S)
+            continue
+        w.close()
+        try:
+            await w.wait_closed()
+        except (ConnectionError, OSError):
+            pass
+        return
+    raise TimeoutError(
+        f"Modbus server failed to bind {host}:{port} within "
+        f"{_BIND_TIMEOUT_S:.1f}s: {last_err}"
+    )

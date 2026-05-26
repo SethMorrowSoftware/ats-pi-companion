@@ -86,11 +86,13 @@ async def _dispatch_command(driver: IODriver, store: RegisterStore, intent: Comm
 
 
 async def _amain(args: argparse.Namespace) -> int:
-    cfg = load_config(args.config)
+    # Configure logging FIRST so config-load errors and any messages from
+    # driver/store construction land in the right place.
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
+    cfg = load_config(args.config)
     log.info("atspi v%s starting (unit_id=%d)", __version__, cfg.site.unit_id)
 
     driver = _build_io_driver(cfg)

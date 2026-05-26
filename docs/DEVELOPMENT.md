@@ -43,20 +43,22 @@ modpoll -m tcp -a 1 -r 1 -c 6 127.0.0.1
 
 ### Flipping mock state at runtime
 
-Send signals to the running atspi process:
+The mock driver does not yet expose a control endpoint on a running
+service. For integration tests against GenWatch, the workable flows are:
 
-```bash
-# Cycle position: utility → generator → transferring → unknown → utility
-kill -USR1 $(pgrep -f 'atspi --config')
+- **Modbus-only check** — point a `modpoll` client at the running service
+  and verify reads/writes against the registers documented in the ICD.
+- **Pytest integration test** — instantiate `IOMockDriver` directly and
+  use `set_normal_available()` / `set_position()` to drive state, then
+  drive the full pipeline through `RegisterStore` (see `tests/test_state.py`
+  for the pattern).
+- **For end-to-end with GenWatch** — temporarily edit
+  `src/atspi/io_mock.py` to start in the desired state, restart the
+  service, observe GenWatch.
 
-# Toggle normal_available (engine_start_calling mirrors the inverted value,
-# matching how the ASCO actually behaves on utility loss).
-kill -USR2 $(pgrep -f 'atspi --config')
-```
-
-The signal handlers are only installed when the mock driver is the
-active one (`io.driver: mock` in config). Production runs with
-`io.driver: adam` ignore both signals.
+A signal-driven control hook (e.g. SIGUSR1 to toggle utility) is a
+small future improvement; until then, scripted integration testing is
+the supported flow.
 
 ## Running tests
 
@@ -64,9 +66,9 @@ active one (`io.driver: mock` in config). Production runs with
 python -m pytest tests/ -v
 ```
 
-The test suite (51 tests) runs entirely without hardware — uses the
-mock driver, an in-memory fake for the ADAM driver, and tmp files for
-persistence. Lint with:
+The test suite runs entirely without hardware — uses the mock driver,
+an in-memory fake for the ADAM driver, and tmp files for persistence.
+Lint with:
 
 ```bash
 python -m ruff check src/ tests/
@@ -112,15 +114,27 @@ CI runs both on every push (see `.github/workflows/ci.yml`).
 ## Production install
 
 ```bash
+# Create the dedicated service user (no shell, no home).
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin atspi
+
+# Install the package system-wide (or point ExecStart at a venv's atspi).
+sudo pip install /opt/ats-pi-companion
+
+# Install the unit and config.
+sudo mkdir -p /etc/atspi
 sudo cp systemd/atspi.service /etc/systemd/system/
 sudo cp config.example.yaml /etc/atspi/config.yaml
 # Edit /etc/atspi/config.yaml for the site
+sudo systemctl daemon-reload
 sudo systemctl enable atspi
 sudo systemctl start atspi
 sudo journalctl -u atspi -f
 ```
 
-The service starts on boot, restarts on crash, and logs to journal.
+The unit declares `StateDirectory=atspi`, so `/var/lib/atspi` is created
+automatically (mode 0750, owned by `atspi:atspi`) on first start — no
+manual chown needed. The service starts on boot, restarts on crash, and
+logs to journal.
 
 ## Debugging
 

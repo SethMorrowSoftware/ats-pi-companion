@@ -220,6 +220,17 @@ class IOAdamDriver:
     async def _ensure_connected(self) -> None:
         if self._connected and self._client is not None and self._client.connected:
             return
+        # If a previous read/write set self._connected=False, the pymodbus
+        # client may be in a half-open state where .connect() returns True
+        # but subsequent operations still time out. Close and recreate so
+        # we start from a clean socket. (We don't recreate when _connected
+        # is still True; in that case the client just needs reconnect().)
+        if not self._connected and self._client is not None:
+            try:
+                self._client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._client = None
         await self.connect()
         if not self._connected:
             raise ConnectionError(f"ADAM-6060 unreachable at {self.host}:{self.port}")
