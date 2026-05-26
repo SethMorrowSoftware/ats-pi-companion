@@ -1,12 +1,17 @@
 # Development
 
+For commissioning a real ATS-Pi (Pi + ADAM + ASCO), see
+[`HARDWARE.md §7`](./HARDWARE.md). For field troubleshooting, see
+[`RUNBOOK.md`](./RUNBOOK.md). This document is for someone hacking
+on the service itself.
+
 ## Prerequisites
 
 - Python **3.11+**
 - A POSIX shell
 - `pip` and `venv`
-- (For hardware testing) an ADAM-6060 or any other Modbus TCP I/O device
-  with at least 6 DI + 6 DO channels
+- For ADAM testing: an ADAM-6060 (or any Modbus TCP I/O device with
+  ≥ 6 DI + 6 DO) on the same LAN
 
 ## Setup
 
@@ -19,122 +24,89 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-## Running with mock I/O (no hardware)
+The dev extra pulls in `pytest`, `pytest-asyncio`, and `ruff`. The
+`pymodbus` runtime dep is pinned to `>=3.7.4,<3.8` — bumping past 3.7
+requires porting the datastore code (see `CHANGELOG.md` for rationale).
 
-The `IOMockDriver` keeps all contact states in memory. Start the server,
-then drive states interactively:
+## Running with the mock driver
 
 ```bash
-cp config.example.yaml config.yaml
-# In config.yaml, set io.driver: mock
+cp config.example.yaml config.yaml      # defaults to driver: mock
 atspi --config config.yaml --log-level INFO
 ```
 
-In another terminal, verify reads:
+In another terminal:
 
 ```bash
-pip install modbus-cli   # if not already
 modpoll -m tcp -a 1 -r 1 -c 6 127.0.0.1
-
-# Should return six register values matching the default
-# healthy state: [0, 1, 1, 0, 0, 0]
-# (position=0 utility, normal=1, emergency=1, eng_start=0, mode=0 auto, fault=0)
+# → [0, 1, 1, 0, 0, 0]  default healthy state
 ```
 
-### Flipping mock state at runtime
+### Driving the mock at runtime
 
-The mock driver does not yet expose a control endpoint on a running
-service. For integration tests against GenWatch, the workable flows are:
+The mock driver installs two signal handlers when running on an event
+loop:
 
-- **Modbus-only check** — point a `modpoll` client at the running service
-  and verify reads/writes against the registers documented in the ICD.
-- **Pytest integration test** — instantiate `IOMockDriver` directly and
-  use `set_normal_available()` / `set_position()` to drive state, then
-  drive the full pipeline through `RegisterStore` (see `tests/test_state.py`
-  for the pattern).
-- **For end-to-end with GenWatch** — temporarily edit
-  `src/atspi/io_mock.py` to start in the desired state, restart the
-  service, observe GenWatch.
+| Signal | Effect |
+|---|---|
+| `SIGUSR1` | Cycles `position` through `utility → generator → transferring → unknown → utility` |
+| `SIGUSR2` | Toggles `normal_available`; `engine_start_calling` mirrors the inverted value (as the real ASCO behaves) |
 
-A signal-driven control hook (e.g. SIGUSR1 to toggle utility) is a
-small future improvement; until then, scripted integration testing is
-the supported flow.
+```bash
+kill -USR1 $(pgrep -f 'atspi --config')   # advance position
+kill -USR2 $(pgrep -f 'atspi --config')   # drop / restore utility
+```
+
+This is enough to drive an end-to-end test against a running GenWatch
+without recompiling. For richer scenarios, write a pytest that
+instantiates `IOMockDriver` directly and calls `set_position()` /
+`set_normal_available()` — see `tests/test_state.py` for the pattern.
 
 ## Running tests
 
 ```bash
 python -m pytest tests/ -v
-```
-
-The test suite runs entirely without hardware — uses the mock driver,
-an in-memory fake for the ADAM driver, and tmp files for persistence.
-Lint with:
-
-```bash
 python -m ruff check src/ tests/
 ```
 
-CI runs both on every push (see `.github/workflows/ci.yml`).
+The suite (currently 191 tests) runs entirely without hardware — mock
+driver for the I/O layer, a fake pymodbus client for the ADAM driver,
+`tmp_path` for persistence. CI runs both jobs on every push plus a
+`soak` job that starts the real binary, performs a real Modbus read,
+and asserts a clean SIGTERM exit; and an `audit` job (`pip-audit`,
+informational).
+
+The contract tests in `tests/test_icd_contract.py` drive a real
+pymodbus client against the real server in-process. They are the
+canonical defence against ICD drift on the ATS-Pi side.
 
 ## Manual integration testing against GenWatch
 
-1. Start the ATS-Pi server with mock I/O as above on its standard port
-   (502, or 5020 in dev to avoid root requirement).
-2. On the GenWatch dev machine, set in `/etc/genwatch/config.yaml`:
+1. Start the ATS-Pi with mock I/O on its standard port (502, or 5020
+   in dev to avoid root).
+2. In GenWatch's `/etc/genwatch/config.yaml`:
 
    ```yaml
    ats:
      enabled: true
      host: <ats-pi-ip>
      port: 5020
+     expected_unit_id: 23     # must match this project's site.unit_id
    ```
 
-   Restart GenWatch (`sudo systemctl restart genwatch` or your dev
-   equivalent).
+   Restart GenWatch.
 
-3. In GenWatch's UI:
-   - The ATS card should populate with `position: utility, both sources
-     available`.
-   - The `loadSource` indicator should annotate "(via ATS-Pi)".
+3. GenWatch's ATS card should populate with `position: utility, both
+   sources available`. The `loadSource` indicator should annotate
+   "(via ATS-Pi)".
 
-4. Drive state changes via the ATS-Pi's mock control interface:
-   - Set `normal_available=False` → GenWatch's events feed should
-     log a `UTILITY_LOST` event.
-   - Set `position=generator` → GenWatch's loadSource should flip to
-     `GENERATOR`.
+4. Drive transitions: `kill -USR1` cycles position; `kill -USR2` drops
+   utility. GenWatch's events feed and load source should follow.
 
-5. Test the safety auto-release:
-   - From GenWatch, issue an Inhibit command (when Phase 3 of the
-     GenWatch plan is live).
-   - Stop GenWatch (`sudo systemctl stop genwatch`).
-   - Wait 35 s.
-   - Confirm `cmd_inhibit_active` in the ATS-Pi's register reads `0`
-     (you can verify with `modpoll`).
-
-## Production install
-
-```bash
-# Create the dedicated service user (no shell, no home).
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin atspi
-
-# Install the package system-wide (or point ExecStart at a venv's atspi).
-sudo pip install /opt/ats-pi-companion
-
-# Install the unit and config.
-sudo mkdir -p /etc/atspi
-sudo cp systemd/atspi.service /etc/systemd/system/
-sudo cp config.example.yaml /etc/atspi/config.yaml
-# Edit /etc/atspi/config.yaml for the site
-sudo systemctl daemon-reload
-sudo systemctl enable atspi
-sudo systemctl start atspi
-sudo journalctl -u atspi -f
-```
-
-The unit declares `StateDirectory=atspi`, so `/var/lib/atspi` is created
-automatically (mode 0750, owned by `atspi:atspi`) on first start — no
-manual chown needed. The service starts on boot, restarts on crash, and
-logs to journal.
+5. **Test the safety auto-release.** From GenWatch, assert Inhibit.
+   Stop GenWatch (`sudo systemctl stop genwatch`). Wait 35 s.
+   `modpoll -m tcp -a 1 -r 66 -c 1 <ats-pi-ip>` (PDU `0x0041`) should
+   read `0` — the watchdog has released.
 
 ## Debugging
 
@@ -142,25 +114,29 @@ logs to journal.
 # Watch live logs
 sudo journalctl -u atspi -f
 
-# Check Modbus reachability
+# Modbus reachability
 modpoll -m tcp -a 1 -r 1 -c 6 <ats-pi-ip>
 
-# Check ICD version
+# ICD version
 modpoll -m tcp -a 1 -r 49 -c 2 <ats-pi-ip>   # 0x0030, 0x0031
 
-# Dump every register the spec defines
-modpoll -m tcp -a 1 -r 1 -c 80 <ats-pi-ip>   # raw read of full block
+# Full ICD register block
+modpoll -m tcp -a 1 -r 1 -c 80 <ats-pi-ip>
 ```
+
+`modpoll` isn't in Raspbian's default package set — `sudo apt install
+modbus-cli` once per Pi.
 
 ## Contributing back
 
-The ICD is the source of truth. If you discover a contract issue:
+The ICD is the source of truth. If you find a contract issue:
 
 1. **Don't** silently work around it in either project.
-2. Open a PR against the GenWatch repo's `docs/integrations/ats-pi-icd.md`
-   describing the proposed change. Include rationale and the version
-   bump (minor for additive, major for breaking).
-3. Once that PR is merged, update this project to match in a follow-up PR.
+2. Open a PR against the GenWatch repo's
+   `docs/integrations/ats-pi-icd.md` describing the proposed change,
+   with rationale and the version bump (minor for additive, major for
+   breaking).
+3. Once that merges, update this project to match in a follow-up PR.
 
 Keeping the ICD authoritative is what lets the two projects evolve
 without breaking each other.
