@@ -309,6 +309,67 @@ def test_reserved_addresses_read_zero(addr):
     assert store.read_register(addr) == 0
 
 
+# ─── Time-source correctness (regression for ICD §6.2 + u32 race) ────────
+
+
+def test_uptime_uses_monotonic_not_wallclock(monkeypatch):
+    """ICD §6.2: uptime_s MUST be strictly increasing within a boot. A
+    backward wall-clock jump (NTP correction, manual clock set) must
+    NOT move uptime backward — that signal is reserved for reboots.
+    """
+    # Build a store, sleep briefly, slam wall-clock backward, read uptime.
+    store = RegisterStore()
+    import time as time_mod
+    # Pretend several seconds elapsed in monotonic time without changing
+    # wall-clock. Then move wall-clock backward by an hour.
+    real_mono = time_mod.monotonic
+    monkeypatch.setattr(time_mod, "monotonic", lambda: real_mono() + 10)
+    real_wall = time_mod.time
+    monkeypatch.setattr(time_mod, "time", lambda: real_wall() - 3600)
+    uptime_lo = store.read_register(ADDR_LAST_TRANSFER_TS)  # any uptime call
+    # uptime in seconds; we set monotonic +10 vs boot mono, so uptime ≈ 10.
+    from atspi.state import ADDR_UPTIME_S
+    hi = store.read_register(ADDR_UPTIME_S)
+    lo = store.read_register(ADDR_UPTIME_S + 1)
+    uptime = (hi << 16) | lo
+    assert uptime >= 10, (
+        f"uptime={uptime}; should be >=10 (monotonic source) regardless of "
+        "the wall-clock slam backward"
+    )
+    _ = uptime_lo  # silence unused
+
+
+def test_read_register_u32_pinned_time_returns_coherent_pair():
+    """When ``read_register`` is called with a pinned ``now_wall`` for both
+    words of a u32, the high/low pair MUST reconstruct that exact value.
+    Pre-fix, the two halves each called ``time.time()`` independently and
+    could straddle a high-word boundary (every 65 536 s of wall-clock).
+    """
+    from atspi.state import ADDR_UPTIME_S, ADDR_WALLCLOCK
+
+    store = RegisterStore()
+    # A value that exercises both halves — pretend the wallclock is just
+    # past the 0x10000 (65 536 s) boundary so the high word is non-zero.
+    pinned_wall = 0x12345678
+    pinned_mono = 1_000_000.0  # arbitrary fixed monotonic baseline
+    hi = store.read_register(ADDR_WALLCLOCK, now_wall=pinned_wall, now_mono=pinned_mono)
+    lo = store.read_register(ADDR_WALLCLOCK + 1, now_wall=pinned_wall, now_mono=pinned_mono)
+    assert (hi << 16) | lo == pinned_wall, (
+        f"u32 read returned inconsistent pair: ({hi:#06x}, {lo:#06x}) "
+        f"→ {(hi << 16) | lo:#010x}, expected {pinned_wall:#010x}"
+    )
+
+    # Same for uptime — derived from now_mono.
+    hi = store.read_register(ADDR_UPTIME_S, now_wall=pinned_wall, now_mono=pinned_mono)
+    lo = store.read_register(ADDR_UPTIME_S + 1, now_wall=pinned_wall, now_mono=pinned_mono)
+    uptime = (hi << 16) | lo
+    # uptime = int(pinned_mono - boot_mono). boot_mono is set at __init__
+    # to a real monotonic() value; pinned_mono is 1e6. The result has to
+    # be self-consistent.
+    expected = int(pinned_mono - store._boot_mono)  # noqa: SLF001
+    assert uptime == expected & 0xFFFFFFFF
+
+
 # ─── Mode enforcement (ICD §6) ───────────────────────────────────────────
 
 

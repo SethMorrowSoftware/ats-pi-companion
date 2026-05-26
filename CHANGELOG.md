@@ -9,6 +9,25 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 ## [Unreleased]
 
+### Fixed (time-source correctness)
+
+- `ats_pi_uptime_s` (`0x0014`) now derives from `time.monotonic()`, not
+  `time.time()`. The old wall-clock source meant any NTP correction
+  backward (or manual clock adjustment) made uptime decrease — which
+  ICD §6.2 + §7.3 explicitly reserves as the "undetected reboot"
+  signal. GenWatch would spuriously fire `ATS_PI_REBOOT` events on any
+  large NTP correction.
+- u32 register reads now pin a single timestamp for the whole multi-
+  word read. Previously `uptime_s` and `wallclock` each called
+  `time.*()` separately for the high and low word — at every 65 536 s
+  boundary (the high-word transition) the two halves could straddle
+  the wrap and reconstruct to a value off by `0x10000` (≈18 hours of
+  drift). GenWatch's `TIME_SKEW` alarm would fire on the next prime
+  poll after the boundary.
+- `docs/SPEC.md` removed the stale `logging.level` config example —
+  log level is set via the `--log-level` CLI flag, and the strict
+  config loader would reject a `logging:` section anyway.
+
 ### Added (ICD contract conformance pass)
 
 - `tests/test_icd_contract.py`: 44 end-to-end tests against a real

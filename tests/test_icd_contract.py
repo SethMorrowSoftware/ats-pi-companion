@@ -287,6 +287,57 @@ async def test_uptime_is_monotonic(server):
     assert _u32(r2.registers) >= _u32(r1.registers) + 1
 
 
+async def test_uptime_survives_wallclock_jump_backward(server, monkeypatch):
+    """ICD §6.2 + ICD §7.3: uptime_s MUST be monotonic within a boot —
+    'Backward jump = undetected reboot' on GenWatch's side. An NTP
+    correction backward (or any other wall-clock change) must not move
+    uptime backward.
+    """
+    import time as time_mod
+    client, _ = server
+    r1 = await client.read_holding_registers(address=ADDR_UPTIME_S, count=2, slave=1)
+    before = _u32(r1.registers)
+
+    # Slam wall-clock 1 hour into the past while the service is running.
+    real_time = time_mod.time
+    monkeypatch.setattr(time_mod, "time", lambda: real_time() - 3600)
+
+    r2 = await client.read_holding_registers(address=ADDR_UPTIME_S, count=2, slave=1)
+    after = _u32(r2.registers)
+    assert after >= before, (
+        f"uptime_s went backward across wall-clock NTP correction: "
+        f"{before} → {after}; ICD §6.2 says this is reserved for reboots"
+    )
+
+
+async def test_u32_word_pair_coherent_across_second_boundary(server):
+    """Regression: a u32 read MUST return a coherent (high, low) pair
+    even if the read happens to straddle a second boundary. Previously
+    each word called time.time() separately, so a 1-second tick between
+    the two calls produced an inconsistent value.
+    """
+    import time
+    client, _ = server
+    # Hammer the wallclock register across many ticks; spec says high and
+    # low words must combine to give a value within a tight bound of "now".
+    for _ in range(50):
+        wall_before = int(time.time())
+        r = await client.read_holding_registers(
+            address=ADDR_WALLCLOCK, count=2, slave=1,
+        )
+        wall_after = int(time.time())
+        reconstructed = _u32(r.registers)
+        # The reconstructed value must lie within [before, after] +-1s.
+        # Without the fix, an off-by-one-second straddle would put it
+        # at wall_before + 0x10000 (high word advanced, low word old) or
+        # similar gibberish.
+        assert wall_before - 1 <= reconstructed <= wall_after + 1, (
+            f"u32 wallclock read inconsistent: "
+            f"reconstructed={reconstructed} not in "
+            f"[{wall_before}, {wall_after}]"
+        )
+
+
 async def test_wallclock_is_present_and_recent(server):
     """ICD §1.2: wallclock returns ATS-Pi's epoch s at moment of read."""
     import time
