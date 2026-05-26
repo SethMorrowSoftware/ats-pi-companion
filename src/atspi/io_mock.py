@@ -87,17 +87,25 @@ class IOMockDriver:
             await self._pulse("bypass", bypass_delay_pulse_ms)
 
     async def _pulse(self, which: str, duration_ms: int) -> None:
+        # ICD §6: writes during an active pulse are IGNORED — the original
+        # pulse runs to its scheduled completion without being re-triggered
+        # or extended. This prevents a flapping caller from stacking pulses.
+        if which == "test":
+            if self._test_active:
+                log.debug("mock: cmd_test already active; ignoring re-trigger")
+                return
+            self._test_active = True
+        else:  # bypass
+            if self._bypass_delay_active:
+                log.debug("mock: cmd_bypass_delay already active; ignoring re-trigger")
+                return
+            self._bypass_delay_active = True
+
         # Clamp to ICD §6.1 (500-1500 ms)
         ms = max(500, min(1500, int(duration_ms)))
         if which == "test":
-            self._test_active = True
-            if self._test_release_task is not None:
-                self._test_release_task.cancel()
             self._test_release_task = asyncio.create_task(self._release("test", ms))
-        else:  # bypass
-            self._bypass_delay_active = True
-            if self._bypass_release_task is not None:
-                self._bypass_release_task.cancel()
+        else:
             self._bypass_release_task = asyncio.create_task(self._release("bypass", ms))
         log.info("mock: pulsing %s for %d ms", which, ms)
 

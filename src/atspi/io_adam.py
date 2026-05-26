@@ -191,17 +191,20 @@ class IOAdamDriver:
     # ─── Internal: pulse handling ─────────────────────────────────────
 
     async def _pulse(self, do_index: int, name: str, duration_ms: int) -> None:
+        # ICD §6: writes during an active pulse are IGNORED — the original
+        # pulse runs to its scheduled completion without being re-triggered
+        # or extended.
+        slot = "_test_release_task" if do_index == DO_TEST else "_bypass_release_task"
+        prior = getattr(self, slot, None)
+        if prior is not None and not prior.done():
+            log.debug("ADAM: %s already pulsing; ignoring re-trigger", name)
+            return
+
         ms = max(PULSE_MIN_MS, min(PULSE_MAX_MS, int(duration_ms)))
         coil = DO_COIL_BASE + do_index
         await self._write_coil(coil, True)
         log.info("ADAM: pulsing %s for %d ms", name, ms)
 
-        # Schedule the auto-release. Cancel a prior release task on the
-        # same line so a re-issued pulse extends, not double-clears.
-        slot = "_test_release_task" if do_index == DO_TEST else "_bypass_release_task"
-        prior = getattr(self, slot, None)
-        if prior is not None and not prior.done():
-            prior.cancel()
         setattr(self, slot, asyncio.create_task(self._release(coil, name, ms)))
 
     async def _release(self, coil: int, name: str, after_ms: int) -> None:
