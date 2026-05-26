@@ -1,12 +1,13 @@
 """Register store tests — ICD register layout, transitions, persistence."""
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
 
 from atspi.io_driver import InputSnapshot, OutputState
-from atspi.persistence import StateFile
+from atspi.persistence import PersistedState, StateFile
 from atspi.state import (
     ADDR_CMD_BYPASS_DELAY,
     ADDR_CMD_FORCE_TRANSFER,
@@ -198,3 +199,49 @@ def test_persistence_save_failure_does_not_crash(tmp_path):
 def test_reserved_addresses_read_zero(addr):
     store = RegisterStore()
     assert store.read_register(addr) == 0
+
+
+async def test_apply_input_snapshot_offloads_persistence_from_event_loop(tmp_path):
+    """When invoked on an asyncio event loop, the actual file write must
+    happen in a worker thread so a slow disk does not block the sampling
+    loop.
+    """
+    sf = StateFile(tmp_path / "state.json")
+    real_save = sf.save
+    block_seconds = 0.4  # well over the 100 ms sampling tick
+
+    def slow_save(state: PersistedState) -> None:
+        time.sleep(block_seconds)
+        real_save(state)
+
+    sf.save = slow_save  # type: ignore[assignment]
+    store = RegisterStore(state_file=sf)
+
+    # Seed at utility (no persist yet)
+    store.apply_input_snapshot(_inputs(position="utility"))
+
+    # Trigger a transfer → fires _persist_async_safe → must offload.
+    t0 = time.perf_counter()
+    store.apply_input_snapshot(_inputs(position="generator"))
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 0.05, (
+        f"apply_input_snapshot blocked the event loop for {elapsed*1000:.0f}ms; "
+        "persistence must be offloaded to a worker thread"
+    )
+
+    # Now drain the executor and verify the file landed.
+    await asyncio.sleep(block_seconds + 0.2)
+    loaded = sf.load()
+    assert loaded.transfer_count_lifetime == 1
+
+
+def test_apply_input_snapshot_persists_synchronously_outside_event_loop(tmp_path):
+    """In a sync context (no running event loop), the save is performed
+    inline. Existing call sites and tests rely on this behaviour.
+    """
+    sf = StateFile(tmp_path / "state.json")
+    store = RegisterStore(state_file=sf)
+    store.apply_input_snapshot(_inputs(position="utility"))
+    store.apply_input_snapshot(_inputs(position="generator"))
+    # File visible immediately, no executor drain needed.
+    assert sf.load().transfer_count_lifetime == 1

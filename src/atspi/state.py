@@ -12,6 +12,7 @@ to the side under the lock and assigning the full snapshot at once.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -344,6 +345,13 @@ class RegisterStore:
 
     def _persist_async_safe(self) -> None:
         """Snapshot persisted fields under the lock, then write outside.
+
+        When running on an asyncio event loop (the production case), the
+        actual file write (including fsync, which can stall 50–200 ms on
+        a microSD) is offloaded to the loop's default executor so the
+        10 Hz sampling loop is not blocked. Callers from a synchronous
+        context (unit tests) get a synchronous save.
+
         Catches I/O errors so a flaky disk never crashes the service.
         """
         with self._lock:
@@ -352,6 +360,14 @@ class RegisterStore:
                 last_transfer_to_gen_ts=self._snap.last_transfer_to_gen_ts,
                 last_retransfer_to_util_ts=self._snap.last_retransfer_to_util_ts,
             )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._save_blocking(persisted)
+            return
+        loop.run_in_executor(None, self._save_blocking, persisted)
+
+    def _save_blocking(self, persisted: PersistedState) -> None:
         try:
             self._state_file.save(persisted)
         except OSError as e:
