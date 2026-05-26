@@ -1,0 +1,41 @@
+# ATS-Pi companion service configuration
+#
+# Install:
+#   sudo mkdir -p /etc/atspi
+#   sudo cp config.example.yaml /etc/atspi/config.yaml
+#   sudo nano /etc/atspi/config.yaml
+#
+# See README.md for setup and docs/SPEC.md for behaviour.
+
+# ─── Modbus TCP server (the interface GenWatch reads) ─────────────────────
+# Bind address and port for the inbound Modbus TCP server. Use 0.0.0.0
+# to listen on all interfaces; for site security prefer the specific
+# IP of the OT-VLAN interface. Port 502 is the standard Modbus TCP
+# port — use a high port (e.g. 5020) for dev to avoid root.
+modbus_server:
+  host: 0.0.0.0
+  port: 502
+  unit_id: 1
+
+# ─── I/O driver (the physical interface to the ASCO) ──────────────────────
+# driver: 'mock'  — no hardware; for dev/CI and integration testing
+#         'adam'  — Advantech ADAM-6060 on Modbus TCP (production)
+io:
+  driver: mock
+
+  # Used when driver: adam
+  adam:
+    host: 192.168.1.251
+    port: 502
+    unit_id: 1
+
+# ─── Site identification ──────────────────────────────────────────────────
+# Reported via the ats_pi_unit_id register (ICD §5.4). GenWatch's
+# expected_unit_id sanity check compares against this value.
+site:
+  unit_id: 23
+
+# ─── Persistence ──────────────────────────────────────────────────────────
+# The transfer_count_lifetime counter MUST survive reboots per ICD §9.3.
+persistence:
+  state_file: /var/lib/atspi/state.json

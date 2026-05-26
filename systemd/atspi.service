@@ -1,0 +1,30 @@
+[Unit]
+Description=ATS-Pi companion service (ASCO transfer switch → Modbus TCP)
+Documentation=https://github.com/SethMorrowSoftware/ats-pi-companion
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=atspi
+Group=atspi
+ExecStart=/usr/local/bin/atspi --config /etc/atspi/config.yaml
+Restart=on-failure
+RestartSec=5
+WatchdogSec=60
+NotifyAccess=main
+
+# Sandboxing — minimal privileges
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/atspi
+
+# Logging — journal-friendly
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=atspi
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,325 @@
+# ATS-Pi Implementation Specification
+
+| | |
+|---|---|
+| **Audience** | Engineer implementing the ATS-Pi server |
+| **Pre-reads** | [ICD](https://github.com/SethMorrowSoftware/GenWatch/blob/main/docs/integrations/ats-pi-icd.md) (mandatory), [HARDWARE.md](./HARDWARE.md), [DEVELOPMENT.md](./DEVELOPMENT.md) |
+| **Tracking issue** | TBD |
+
+This document describes **how** to implement the ATS-Pi to honor the
+ICD. The ICD specifies the wire-level contract — what GenWatch sees.
+This document specifies what the ATS-Pi does internally to produce that
+contract.
+
+---
+
+## 1. Software architecture
+
+```
+                  ┌─────────────────────────────────────┐
+                  │              atspi                  │
+                  │                                     │
+                  │  ┌────────────────┐                 │
+                  │  │ Modbus TCP     │ ◄── GenWatch    │
+                  │  │ server         │                 │
+                  │  │ (pymodbus)     │                 │
+                  │  └───────┬────────┘                 │
+                  │          │                          │
+                  │  ┌───────▼────────┐                 │
+                  │  │ Register store │                 │
+                  │  │ (atspi.state)  │                 │
+                  │  └───────┬────────┘                 │
+                  │          ▲                          │
+                  │  ┌───────┴────────┐                 │
+                  │  │ Sampling loop  │                 │
+                  │  │ (10 Hz)        │                 │
+                  │  └───────┬────────┘                 │
+                  │          │                          │
+                  │  ┌───────▼────────┐                 │
+                  │  │ I/O driver     │ ◄── hardware    │
+                  │  │ (abstract)     │                 │
+                  │  └────────────────┘                 │
+                  │     ▲           ▲                   │
+                  │  io_mock     io_adam                │
+                  └─────────────────────────────────────┘
+```
+
+Five concerns, cleanly separated:
+
+1. **I/O driver** — physical contact reads + relay drives. Abstract base
+   class with two concrete impls: `io_mock` (for dev/CI) and `io_adam`
+   (for production, Advantech ADAM-6060 over Modbus TCP).
+2. **Register store** — in-memory representation of the ICD §5 register
+   layout. Single source of truth that the sampling loop writes and
+   the Modbus server reads. Atomic snapshot publication so torn reads
+   are impossible (ICD §8.1).
+3. **Sampling loop** — reads the I/O driver at 10 Hz, applies contact
+   debouncing, updates the register store. Emits no events itself — it
+   only updates state.
+4. **Modbus TCP server** — pymodbus server bound to the register store.
+   Translates client reads/writes into store operations. Stateless.
+5. **Safety watchdog** — monitors time-since-last-successful-read from
+   GenWatch. On the 30 s comms-loss threshold (ICD §8.3) auto-releases
+   any asserted maintained commands by writing 0 to their registers.
+
+---
+
+## 2. I/O driver interface
+
+`atspi.io_driver.IODriver` is an abstract base class. All physical I/O
+must go through it. The two implementations:
+
+| Class | Use case | Notes |
+|---|---|---|
+| `IOMockDriver` | Dev, CI, manual integration testing | Holds in-memory contact states; flippable from a CLI/REPL |
+| `IOAdamDriver` | Production | Talks to ADAM-6060 over Modbus TCP using pymodbus client |
+
+```python
+class IODriver(Protocol):
+    # Read all six inputs in a single atomic operation. Returns
+    # (normal_avail, emerg_avail, pos_normal, pos_emerg, engine_start,
+    # load_disconnect_pulsed).
+    async def read_inputs(self) -> InputSnapshot: ...
+
+    # Set the four maintained-or-pulsed outputs. Each is True (assert)
+    # or False (release). Pulsed outputs (test, bypass) are released
+    # automatically by the driver after the duration passed.
+    async def drive_outputs(
+        self,
+        test_pulse_ms: int | None = None,
+        inhibit: bool = False,
+        force_transfer: bool = False,
+        bypass_delay_pulse_ms: int | None = None,
+    ) -> None: ...
+
+    # Read back the actual driven state, for ICD §5.5 mirror.
+    async def read_output_state(self) -> OutputState: ...
+
+    # Lifecycle
+    async def connect(self) -> bool: ...
+    async def close(self) -> None: ...
+```
+
+The mock implementation backs each method with a `dict` and exposes
+public setters so tests can flip inputs and observe what the server
+publishes. The ADAM-6060 implementation wraps a pymodbus client and
+maps the abstract operations to the ADAM's documented register map.
+
+---
+
+## 3. Sampling loop
+
+```python
+async def sampling_loop(driver: IODriver, store: RegisterStore):
+    while True:
+        try:
+            snapshot = await driver.read_inputs()
+            store.apply_input_snapshot(snapshot)
+            output_state = await driver.read_output_state()
+            store.apply_output_state(output_state)
+        except Exception as e:
+            log.exception("sampling cycle failed: %s", e)
+            store.set_fault_bit(OUTPUT_FAULT)
+        await asyncio.sleep(0.1)  # 10 Hz
+```
+
+Key requirements:
+
+- **One atomic store update per cycle** — `apply_input_snapshot` must
+  swap all five core-state values atomically so a Modbus read can never
+  see a mid-update split state (ICD §8.1).
+- **No exceptions escape** — a driver fault bumps a fault bit in the
+  register store and the loop continues. We never crash the service
+  over a transient I/O hiccup.
+- **Contact debounce** — apply ≥ 5 ms hardware debounce in the I/O
+  driver before publishing. Optionally extend in the store for problem
+  contacts.
+
+---
+
+## 4. Modbus TCP server
+
+Use `pymodbus.server.StartAsyncTcpServer`. The data block is a custom
+subclass of `ModbusSequentialDataBlock` that translates `getValues` /
+`setValues` calls into reads/writes on the `RegisterStore`:
+
+```python
+class LiveDataBlock(ModbusSequentialDataBlock):
+    def __init__(self, store: RegisterStore):
+        super().__init__(0, [0] * 0x0200)
+        self._store = store
+
+    def getValues(self, address, count=1):
+        # pymodbus passes 1-based addresses
+        return [self._store.read_register(address - 1 + i) for i in range(count)]
+
+    def setValues(self, address, values):
+        for i, v in enumerate(values):
+            self._store.write_register(address - 1 + i, int(v))
+```
+
+Bind to port 502 (configurable). Unit ID 1. No authentication (ICD §3).
+
+---
+
+## 5. Safety watchdog (ICD §8.3)
+
+This is the **single most safety-critical component** of the service.
+If GenWatch goes silent (network failure, browser close, kernel
+panic, anything) while a maintained command is asserted, the ATS-Pi
+must release that command within 30 s.
+
+```python
+class SafetyWatchdog:
+    """Watches time-since-last-read from any Modbus client.
+    Auto-releases maintained commands after timeout.
+    """
+    TIMEOUT_S = 30
+
+    def __init__(self, store: RegisterStore):
+        self._store = store
+        self._last_read_monotonic = time.monotonic()
+        self._released_for_timeout = False
+
+    def note_modbus_read(self) -> None:
+        """Called by the data block on every successful read."""
+        self._last_read_monotonic = time.monotonic()
+        self._released_for_timeout = False
+
+    async def run(self):
+        while True:
+            await asyncio.sleep(1.0)
+            elapsed = time.monotonic() - self._last_read_monotonic
+            if elapsed > self.TIMEOUT_S and not self._released_for_timeout:
+                log.warning(
+                    "comms timeout (%.1fs since last read) — auto-releasing maintained commands",
+                    elapsed,
+                )
+                self._store.release_maintained_commands()
+                self._released_for_timeout = True
+```
+
+The exact algorithm:
+
+1. Hook `note_modbus_read()` into `LiveDataBlock.getValues` so every
+   successful read updates the last-read time.
+2. The watchdog task wakes every second and checks elapsed time.
+3. On timeout: set `cmd_inhibit_active` and `cmd_force_transfer_active`
+   to false, and physically release the corresponding outputs via the
+   I/O driver. Pulsed commands (`test`, `bypass_delay`) self-clear
+   already so they don't need handling here.
+4. The auto-released state is reflected in the next Modbus read (read-
+   back registers at `0x0040-0x0043`), so a recovering GenWatch
+   correctly observes "I had inhibit on, but it's been released."
+5. Once a successful read happens again, the released-for-timeout
+   flag clears and the watchdog re-arms.
+
+**Test this with a real timer.** A unit test that mocks `time.monotonic`
+is not sufficient — the safety guarantee must hold against real wall
+time.
+
+---
+
+## 6. State persistence
+
+Per ICD §9.3:
+
+- **MUST persist:** `transfer_count_lifetime`. Survives reboots.
+- **SHOULD persist:** `last_transfer_to_gen_ts`, `last_retransfer_to_util_ts`.
+- **MUST reset on reboot:** `ats_pi_uptime_s` (per definition), all
+  command registers (start in "no commands asserted" state per §9.3).
+
+Simplest implementation: a small JSON file at `/var/lib/atspi/state.json`
+written on each transition. Read at boot, default to zeros if missing
+or corrupt.
+
+---
+
+## 7. Configuration
+
+YAML, loaded from `--config` flag. Example:
+
+```yaml
+modbus_server:
+  host: 0.0.0.0          # 0.0.0.0 = listen on all interfaces
+  port: 502
+  unit_id: 1
+
+io:
+  driver: adam            # 'adam' or 'mock'
+  adam:
+    host: 192.168.1.251   # ADAM-6060's IP
+    port: 502
+    unit_id: 1
+
+site:
+  unit_id: 23             # ats_pi_unit_id register (ICD §5.4)
+
+persistence:
+  state_file: /var/lib/atspi/state.json
+
+logging:
+  level: INFO
+```
+
+Validate at startup; fail fast on missing required fields.
+
+---
+
+## 8. Implementation phasing
+
+Suggested work breakdown (the GenWatch side's Phase 1 is already done,
+so this is purely the ATS-Pi side):
+
+| Phase | What | Test |
+|---|---|---|
+| **A** | Register store + mock I/O driver + Modbus server | `modpoll` reads correct values; flipping mock inputs changes responses |
+| **B** | Sampling loop + atomic snapshot | Inputs sampled at 10 Hz; reads from GenWatch are coherent (no torn states) |
+| **C** | Write command handling | `modpoll`-driven writes mirror to read-back registers; pulsed commands self-clear |
+| **D** | Safety watchdog | Kill the modpoll process with `force_transfer` asserted; verify release within 30 s |
+| **E** | ADAM-6060 I/O driver | Verified bench setup with the real module reading test inputs |
+| **F** | Persistence | `transfer_count_lifetime` survives a process restart |
+| **G** | Production install — systemd, config, real ASCO wiring | Golden test sequence (ICD §13) passes against real hardware |
+
+Phases A-D can be done entirely with mock I/O. Phase E onwards needs
+hardware.
+
+---
+
+## 9. Acceptance criteria
+
+The implementation is complete when:
+
+1. The ICD §13 golden test sequence passes against the real ATS-Pi
+   wired to the real ASCO.
+2. GenWatch's commissioning checklist
+   ([`ats-pi-plan.md`](https://github.com/SethMorrowSoftware/GenWatch/blob/main/docs/integrations/ats-pi-plan.md)
+   §8) clears with `ats.enabled: true`.
+3. The safety watchdog releases maintained commands within 30 ± 5 s of
+   GenWatch comms going silent — verified by stopping GenWatch with
+   inhibit asserted and observing the release.
+4. ICD version match: `icd_version_major` register reads `1`,
+   `icd_version_minor` reads `0` (or higher minor for additive changes).
+5. The systemd service starts automatically on boot and recovers
+   automatically on crash (no manual intervention needed).
+
+---
+
+## 10. Open design questions
+
+Notes for the implementer to resolve as they go:
+
+- **State file vs SQLite for persistence.** JSON file is simpler;
+  SQLite is more robust against corruption. Recommendation: JSON for
+  v1, atomic-rename pattern (write to `.tmp`, rename), check JSON
+  parsability on read and fall back to zeros if corrupt.
+- **Watchdog timeout precision.** ICD says "30 ± 5 s" — implement
+  with 1 s polling granularity, document that real timing will be in
+  [29, 31] s. Add a metric counter for "auto-release fired" events
+  so we can spot operational anomalies.
+- **Output relay readback.** The ADAM-6060 has independent read-back
+  of its DO state — use that to detect a stuck relay (drive high, read
+  low → set `OUTPUT_FAULT` fault bit per ICD §5.1.1).
+- **Logging.** Default to systemd-journal-friendly logging (stdout,
+  no rotation). The ATS-Pi project owns its own log; GenWatch's
+  events feed is fed via the Modbus state changes, not via shared logs.
