@@ -147,6 +147,65 @@ async def _amain(args: argparse.Namespace) -> int:
     return 0
 
 
+def _export_state(config_path: str, target_path: str) -> int:
+    """Copy the current state.json to ``target_path``. Loads through
+    StateFile so an unreadable source bails out before clobbering the
+    target.
+    """
+    cfg = load_config(config_path)
+    src = StateFile(cfg.persistence.state_file)
+    persisted = src.load()  # falls back to zeros on missing/corrupt
+    dst = StateFile(target_path)
+    dst.save(persisted)
+    print(
+        f"exported state to {target_path}: "
+        f"lifetime={persisted.transfer_count_lifetime}",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _import_state(config_path: str, source_path: str) -> int:
+    """Validate ``source_path`` as a PersistedState and copy it to the
+    configured state file. Refuses to import if the source is unreadable
+    (would otherwise wipe the live state with zeros).
+    """
+    import json as _json
+    from pathlib import Path
+    cfg = load_config(config_path)
+    src_p = Path(source_path)
+    if not src_p.exists():
+        print(f"import-state: source file not found: {source_path}", file=sys.stderr)
+        return 2
+    # StateFile.load() returns zeros on corruption — that's the right
+    # behaviour for normal startup, but for an explicit import we want
+    # fail-fast so we don't silently zero the live state.
+    with src_p.open() as f:
+        try:
+            _json.load(f)
+        except _json.JSONDecodeError as e:
+            print(
+                f"import-state: refusing to import; source is not valid JSON ({e})",
+                file=sys.stderr,
+            )
+            return 2
+    src = StateFile(source_path)
+    persisted = src.load()
+    dst = StateFile(cfg.persistence.state_file)
+    dst.save(persisted)
+    print(
+        f"imported state from {source_path} to {cfg.persistence.state_file}: "
+        f"lifetime={persisted.transfer_count_lifetime}",
+        file=sys.stderr,
+    )
+    print(
+        "NOTE: if atspi is currently running, restart it for the new state to "
+        "take effect — the in-memory snapshot is loaded once at startup.",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="atspi", description="ATS-Pi companion service")
     ap.add_argument("--config", required=True, help="Path to config.yaml")
@@ -155,8 +214,28 @@ def main() -> None:
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
+    # State-management one-shots. Each runs and exits without starting the
+    # service. Useful for: backups before deploys, cloning a unit to a
+    # spare Pi, recovering after a microSD swap.
+    state_grp = ap.add_mutually_exclusive_group()
+    state_grp.add_argument(
+        "--export-state", metavar="PATH",
+        help="Copy the live state.json to PATH and exit. Validates JSON "
+             "before writing.",
+    )
+    state_grp.add_argument(
+        "--import-state", metavar="PATH",
+        help="Replace state.json with the contents of PATH and exit. "
+             "Stop the service first; the live process loads state once at "
+             "startup.",
+    )
     ap.add_argument("--version", action="version", version=f"atspi {__version__}")
     args = ap.parse_args()
+
+    if args.export_state:
+        sys.exit(_export_state(args.config, args.export_state))
+    if args.import_state:
+        sys.exit(_import_state(args.config, args.import_state))
     sys.exit(asyncio.run(_amain(args)))
 
 
