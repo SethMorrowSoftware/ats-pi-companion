@@ -5,14 +5,24 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# Type=notify pairs with atspi's sd_notify pings — systemd marks the
+# unit "active" only after READY=1 and restarts it if WATCHDOG=1 stops
+# arriving within WatchdogSec.
+Type=notify
+NotifyAccess=main
+WatchdogSec=60
+
 User=atspi
 Group=atspi
+
+# The 'atspi' entry point is installed by pip into the same prefix
+# Python is using. Hard-coding /usr/local/bin/atspi assumes a system-
+# wide pip install (e.g. `sudo pip install /opt/ats-pi-companion`).
+# If you deploy from a venv, point this at the venv's bin/atspi.
 ExecStart=/usr/local/bin/atspi --config /etc/atspi/config.yaml
+
 Restart=on-failure
 RestartSec=5
-WatchdogSec=60
-NotifyAccess=main
 
 # Sandboxing — minimal privileges
 NoNewPrivileges=true
@@ -20,6 +30,12 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/var/lib/atspi
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
 
 # Logging — journal-friendly
 StandardOutput=journal

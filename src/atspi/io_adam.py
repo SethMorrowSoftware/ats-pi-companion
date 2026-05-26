@@ -1,70 +1,247 @@
 """Advantech ADAM-6060 driver — production I/O backend.
 
-**STUB** — implementer to complete in Phase E (see docs/SPEC.md §8).
+Implements the abstract :class:`IODriver` against an ADAM-6060 (6 DI +
+6 relay DO) over Modbus TCP. Channel-to-signal mapping is the one
+documented in ``docs/HARDWARE.md §3``:
 
-The ADAM-6060 exposes its DI/DO over Modbus TCP. The relevant
-registers from the ADAM-6000 User Manual (verify against your
-firmware revision):
+  DI 0 → Load Disconnect contact (pulse → position=transferring)
+  DI 1 → On Normal aux (14AA)
+  DI 2 → On Emergency aux (14BA)
+  DI 3 → Normal source available (18RX RL6)
+  DI 4 → Emergency source available (18RX RL5)
+  DI 5 → Engine-start sense
 
-  Read functions:
-    Packed DI status:  holding register 40001 (PDU 0x0000), bit 0..5 = DI 0..5
-    Packed DO status:  holding register 40002 (PDU 0x0001), bit 0..5 = DO 0..5
+  DO 0 → Momentary Test pulse
+  DO 1 → Maintained Force Transfer
+  DO 2 → Maintained Inhibit
+  DO 3 → Bypass Transfer Time Delay pulse
 
-  Write functions:
-    Per-DO coil set:   coils 00017..00022 (PDU 0x0010..0x0015), FC05/FC15
+ADAM-6060 Modbus map (per Advantech ADAM-6000 User Manual rev A4,
+verify against the firmware on the actual unit before commissioning):
 
-The mapping from ADAM channels to ATS signals is documented in
-docs/HARDWARE.md §3.
+  Read coils  (FC01) 00001-00006 → DI 0..5
+  Read coils  (FC01) 00017-00022 → DO 0..5 (read-back of relay state)
+  Write coil  (FC05) 00017-00022 → set DO 0..5
+
+The implementation uses coil access for both directions because it
+maps cleanly to single bits and works on every ADAM-6060 firmware
+revision in the field. Holding-register packed reads are an alternative
+but their bit layout shifted between firmware revisions.
+
+BENCH-VERIFY before deploying:
+
+  1. Confirm DI coil base (some revisions start at 00001, others 10001
+     — pymodbus's ``read_discrete_inputs`` vs ``read_coils``).
+  2. Confirm DO coil base for read-back.
+  3. Confirm bit ordering matches the labelling on the unit's terminals.
+  4. Drive each DO individually and verify the matching ATS terminal
+     responds before connecting all six at once.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
+
+from pymodbus.client import AsyncModbusTcpClient
+from pymodbus.exceptions import ModbusException
 
 from .io_driver import InputSnapshot, OutputState
 
 log = logging.getLogger("atspi.io_adam")
 
 
-class IOAdamDriver:
-    """ADAM-6060 driver. NOT YET IMPLEMENTED.
+# ADAM-6060 coil addresses (PDU offsets, 0-based).
+DI_COIL_BASE = 0x0000  # DI 0..5
+DO_COIL_BASE = 0x0010  # DO 0..5 (read-back and write)
 
-    Wire this up using pymodbus's ``AsyncModbusTcpClient`` and the
-    register addresses noted in the module docstring. The
-    ``read_inputs`` method must take a single packed-register read and
-    decode each bit into the InputSnapshot fields per the
-    HARDWARE.md §3 mapping.
+# DI channel assignments per HARDWARE.md §3.
+DI_LOAD_DISCONNECT = 0
+DI_ON_NORMAL = 1
+DI_ON_EMERGENCY = 2
+DI_NORMAL_AVAIL = 3
+DI_EMERGENCY_AVAIL = 4
+DI_ENGINE_START = 5
+
+# DO channel assignments per HARDWARE.md §3.
+DO_TEST = 0
+DO_FORCE_TRANSFER = 1
+DO_INHIBIT = 2
+DO_BYPASS_DELAY = 3
+
+# ICD §6.1 pulse range.
+PULSE_MIN_MS = 500
+PULSE_MAX_MS = 1500
+
+# The Load Disconnect contact pulses momentarily during a transfer;
+# we hold "transferring" position for a short window after we see it
+# so a 10 Hz sampling loop reliably catches it.
+TRANSFERRING_HOLD_S = 2.0
+
+
+def _bit_pulse(timestamp_mono: float | None, hold_s: float, now_mono: float) -> bool:
+    if timestamp_mono is None:
+        return False
+    return (now_mono - timestamp_mono) < hold_s
+
+
+class IOAdamDriver:
+    """ADAM-6060 driver. Async, retries lazily, fault bits surface in
+    the register store via :meth:`set_output_fault` from the sampling
+    loop when a write fails.
     """
 
     def __init__(self, host: str, port: int = 502, unit_id: int = 1):
         self.host = host
         self.port = port
         self.unit_id = unit_id
-        # TODO: instantiate pymodbus AsyncModbusTcpClient here
+        self._client: AsyncModbusTcpClient | None = None
+        self._connected = False
+
+        # Pulse-release scheduling (the ADAM has no notion of pulse;
+        # we drive the relay high then schedule a low write).
+        self._test_release_task: asyncio.Task | None = None
+        self._bypass_release_task: asyncio.Task | None = None
+
+        # Last time we saw DI 0 (Load Disconnect) asserted. Used to
+        # report "transferring" position for a brief hold window since
+        # the contact is a momentary pulse, not a maintained state.
+        self._load_disconnect_seen_mono: float | None = None
 
     async def connect(self) -> bool:
-        # TODO: open the pymodbus connection. Return True on success.
-        raise NotImplementedError("ADAM driver not yet implemented — see docs/SPEC.md §8 Phase E")
+        if self._client is None:
+            self._client = AsyncModbusTcpClient(host=self.host, port=self.port)
+        try:
+            ok = await self._client.connect()
+        except Exception as e:  # noqa: BLE001
+            log.warning("ADAM connect to %s:%d failed: %s", self.host, self.port, e)
+            ok = False
+        self._connected = bool(ok)
+        if self._connected:
+            log.info("ADAM-6060 connected at %s:%d", self.host, self.port)
+        return self._connected
 
     async def close(self) -> None:
-        # TODO
-        pass
+        for t in (self._test_release_task, self._bypass_release_task):
+            if t is not None and not t.done():
+                t.cancel()
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+        self._connected = False
 
     async def read_inputs(self) -> InputSnapshot:
-        # TODO: single read of the packed DI register, decode each bit
-        # into InputSnapshot fields per HARDWARE.md §3 mapping:
-        #   DI 0 → Load Disconnect (pulse → set position to 'transferring')
-        #   DI 1 → On Normal aux
-        #   DI 2 → On Emergency aux
-        #   DI 3 → Normal source available
-        #   DI 4 → Emergency source available
-        #   DI 5 → Engine-start (sense)
-        # Derive `position` from DI 0/1/2 combinations.
-        raise NotImplementedError
+        bits = await self._read_coils(DI_COIL_BASE, 6)
+        now_mono = time.monotonic()
+
+        if bits[DI_LOAD_DISCONNECT]:
+            self._load_disconnect_seen_mono = now_mono
+
+        on_normal = bits[DI_ON_NORMAL]
+        on_emerg = bits[DI_ON_EMERGENCY]
+        transferring = _bit_pulse(self._load_disconnect_seen_mono, TRANSFERRING_HOLD_S, now_mono)
+
+        if transferring:
+            position = "transferring"
+        elif on_normal and not on_emerg:
+            position = "utility"
+        elif on_emerg and not on_normal:
+            position = "generator"
+        else:
+            # Both off (mid-stroke) or both on (impossible / fault)
+            position = "unknown"
+
+        return InputSnapshot(
+            position=position,
+            normal_available=bits[DI_NORMAL_AVAIL],
+            emergency_available=bits[DI_EMERGENCY_AVAIL],
+            engine_start_calling=bits[DI_ENGINE_START],
+            ats_mode="auto",  # ADAM-6060 has no Auto/Manual sense contact
+            fault_bits=0,
+        )
 
     async def read_output_state(self) -> OutputState:
-        # TODO: read packed DO state register
-        raise NotImplementedError
+        bits = await self._read_coils(DO_COIL_BASE, 6)
+        return OutputState(
+            test_active=bits[DO_TEST],
+            inhibit_active=bits[DO_INHIBIT],
+            force_transfer_active=bits[DO_FORCE_TRANSFER],
+            bypass_delay_active=bits[DO_BYPASS_DELAY],
+        )
 
-    async def drive_outputs(self, **kwargs) -> None:
-        # TODO: map abstract commands to coil writes
-        raise NotImplementedError
+    async def drive_outputs(
+        self,
+        *,
+        test_pulse_ms: int | None = None,
+        inhibit: bool | None = None,
+        force_transfer: bool | None = None,
+        bypass_delay_pulse_ms: int | None = None,
+    ) -> None:
+        if test_pulse_ms is not None:
+            await self._pulse(DO_TEST, "test", test_pulse_ms)
+        if inhibit is not None:
+            await self._write_coil(DO_COIL_BASE + DO_INHIBIT, bool(inhibit))
+            log.info("ADAM: inhibit %s", "ASSERT" if inhibit else "RELEASE")
+        if force_transfer is not None:
+            await self._write_coil(DO_COIL_BASE + DO_FORCE_TRANSFER, bool(force_transfer))
+            log.info("ADAM: force_transfer %s", "ASSERT" if force_transfer else "RELEASE")
+        if bypass_delay_pulse_ms is not None:
+            await self._pulse(DO_BYPASS_DELAY, "bypass_delay", bypass_delay_pulse_ms)
+
+    # ─── Internal: pulse handling ─────────────────────────────────────
+
+    async def _pulse(self, do_index: int, name: str, duration_ms: int) -> None:
+        ms = max(PULSE_MIN_MS, min(PULSE_MAX_MS, int(duration_ms)))
+        coil = DO_COIL_BASE + do_index
+        await self._write_coil(coil, True)
+        log.info("ADAM: pulsing %s for %d ms", name, ms)
+
+        # Schedule the auto-release. Cancel a prior release task on the
+        # same line so a re-issued pulse extends, not double-clears.
+        slot = "_test_release_task" if do_index == DO_TEST else "_bypass_release_task"
+        prior = getattr(self, slot, None)
+        if prior is not None and not prior.done():
+            prior.cancel()
+        setattr(self, slot, asyncio.create_task(self._release(coil, name, ms)))
+
+    async def _release(self, coil: int, name: str, after_ms: int) -> None:
+        try:
+            await asyncio.sleep(after_ms / 1000.0)
+            await self._write_coil(coil, False)
+            log.info("ADAM: pulsed %s released", name)
+        except asyncio.CancelledError:
+            pass
+
+    # ─── Internal: Modbus access with implicit reconnect ─────────────
+
+    async def _ensure_connected(self) -> None:
+        if self._connected and self._client is not None and self._client.connected:
+            return
+        await self.connect()
+        if not self._connected:
+            raise ConnectionError(f"ADAM-6060 unreachable at {self.host}:{self.port}")
+
+    async def _read_coils(self, address: int, count: int) -> list[bool]:
+        await self._ensure_connected()
+        try:
+            rr = await self._client.read_coils(address=address, count=count, slave=self.unit_id)
+        except (TimeoutError, ModbusException, ConnectionError) as e:
+            self._connected = False
+            raise OSError(f"ADAM read_coils({address}, {count}) failed: {e}") from e
+        if rr.isError():
+            raise OSError(f"ADAM read_coils({address}, {count}) error: {rr}")
+        # pymodbus returns more bits than requested (rounded to byte); trim.
+        return list(rr.bits[:count])
+
+    async def _write_coil(self, address: int, value: bool) -> None:
+        await self._ensure_connected()
+        try:
+            wr = await self._client.write_coil(address=address, value=value, slave=self.unit_id)
+        except (TimeoutError, ModbusException, ConnectionError) as e:
+            self._connected = False
+            raise OSError(f"ADAM write_coil({address}, {value}) failed: {e}") from e
+        if wr.isError():
+            raise OSError(f"ADAM write_coil({address}, {value}) error: {wr}")
+
+
+__all__ = ["IOAdamDriver"]

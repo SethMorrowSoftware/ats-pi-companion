@@ -271,18 +271,20 @@ Validate at startup; fail fast on missing required fields.
 Suggested work breakdown (the GenWatch side's Phase 1 is already done,
 so this is purely the ATS-Pi side):
 
-| Phase | What | Test |
-|---|---|---|
-| **A** | Register store + mock I/O driver + Modbus server | `modpoll` reads correct values; flipping mock inputs changes responses |
-| **B** | Sampling loop + atomic snapshot | Inputs sampled at 10 Hz; reads from GenWatch are coherent (no torn states) |
-| **C** | Write command handling | `modpoll`-driven writes mirror to read-back registers; pulsed commands self-clear |
-| **D** | Safety watchdog | Kill the modpoll process with `force_transfer` asserted; verify release within 30 s |
-| **E** | ADAM-6060 I/O driver | Verified bench setup with the real module reading test inputs |
-| **F** | Persistence | `transfer_count_lifetime` survives a process restart |
-| **G** | Production install — systemd, config, real ASCO wiring | Golden test sequence (ICD §13) passes against real hardware |
+| Phase | What | Status | Test |
+|---|---|---|---|
+| **A** | Register store + mock I/O driver + Modbus server | ✅ done | `modpoll` reads correct values; flipping mock inputs changes responses |
+| **B** | Sampling loop + atomic snapshot | ✅ done | `_StateSnapshot` is frozen and swap-published; covered by `test_state.py` |
+| **C** | Write command handling | ✅ done | Writes return a `CommandIntent`, dispatched to the driver via `on_command`; read-back updates from the next sampling cycle |
+| **D** | Safety watchdog | ✅ done | `test_safety.py` covers timeout / re-arm / driver-error swallowing |
+| **E** | ADAM-6060 I/O driver | ⚠️ code complete, awaiting bench verification | `test_io_adam.py` covers logic against a fake client; bench-verify steps in `io_adam.py` docstring |
+| **F** | Persistence | ✅ done | `persistence.py` + `test_persistence.py`; round-trip across restart in `test_state.py::test_transfer_count_persists_across_restarts` |
+| **G** | Production install — systemd, config, real ASCO wiring | pending | Golden test sequence (ICD §13) passes against real hardware |
 
-Phases A-D can be done entirely with mock I/O. Phase E onwards needs
-hardware.
+Phases A-D and F are done entirely with mock I/O. Phase E's code is
+written but requires the ADAM-6060 on the bench to confirm the coil
+address map matches your firmware revision (see `io_adam.py` docstring
+for the verification checklist).
 
 ---
 

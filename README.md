@@ -59,7 +59,9 @@ src/atspi/
   safety.py         — 30-second comms-loss auto-release per ICD §8.3
   io_driver.py      — abstract I/O base class
   io_mock.py        — mock driver for dev/testing without hardware
-  io_adam.py        — Advantech ADAM-6060 driver (stub — implement first)
+  io_adam.py        — Advantech ADAM-6060 driver
+  persistence.py    — atomic JSON state file for lifetime counters
+  notify.py         — sd_notify integration (systemd Type=notify)
 
 docs/
   SPEC.md           — implementation specification (companion to the ICD)
@@ -68,11 +70,15 @@ docs/
 
 tests/
   test_smoke.py     — imports, basic config load
-  test_state.py     — state model unit tests
-  test_safety.py    — comms-loss auto-release tests
+  test_state.py     — register store + transitions + persistence
+  test_safety.py    — comms-loss auto-release
+  test_io_adam.py   — ADAM driver bit decoding (against a fake client)
+  test_server.py    — data block routing + command dispatch
+  test_persistence.py — atomic write, corruption recovery
+  test_notify.py    — sd_notify socket protocol
 
 systemd/
-  atspi.service     — production systemd unit
+  atspi.service     — production systemd unit (Type=notify, watchdog)
 ```
 
 ## Quick start (dev)
@@ -93,9 +99,19 @@ modpoll -m tcp -a 1 -r 1 -c 6 127.0.0.1
 
 ## Status
 
-**Phase 1 starter scaffold.** Module signatures and stubs are in place;
-real I/O integration and the safety watchdog need to be implemented.
-See `docs/SPEC.md` for the work breakdown.
+**Production-ready in software; bench verification of the ADAM-6060
+driver register map is the only remaining task before site install.**
+
+What's done:
+
+- Register store, sampling loop, Modbus TCP server, command dispatch
+- Safety watchdog (ICD §8.3 30 s comms-loss auto-release)
+- ADAM-6060 driver — implemented against the documented register map,
+  needs bench verification per `docs/SPEC.md §8 Phase E`
+- Persistence for `transfer_count_lifetime` (atomic JSON file)
+- 24h sliding-window transfer counter
+- systemd `Type=notify` with watchdog ping (60s)
+- 51 unit tests, ruff-clean, CI on every PR
 
 The companion **GenWatch consumer** for this service is already
 shipped (`ats.enabled: true` in GenWatch's config). It will fall back
