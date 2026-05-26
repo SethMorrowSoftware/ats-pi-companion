@@ -12,6 +12,7 @@ to the side under the lock and assigning the full snapshot at once.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -85,6 +86,10 @@ FAULT_INPUT = 0x0001
 FAULT_OUTPUT = 0x0002
 FAULT_MODE_UNKNOWN = 0x0004
 FAULT_CALIBRATION = 0x0008
+
+# Bits the orchestrator owns (set/cleared by set_input_fault / set_output_fault).
+# Other bits in fault_summary are sourced from the driver via InputSnapshot.fault_bits.
+_LOCAL_FAULT_MASK = FAULT_INPUT | FAULT_OUTPUT
 
 
 @dataclass(frozen=True)
@@ -194,13 +199,23 @@ class RegisterStore:
 
             self._evict_old_transfers(now_mono)
 
+            # FAULT_INPUT and FAULT_OUTPUT are owned by the sampling-loop and
+            # command-dispatch paths via set_input_fault / set_output_fault.
+            # Other fault bits (MODE_UNKNOWN, CALIBRATION) come from the driver.
+            # Without this merge, a successful read would clobber OUTPUT_FAULT
+            # set by a recently-failed drive_outputs call.
+            merged_fault_bits = (
+                (prev.fault_bits & _LOCAL_FAULT_MASK)
+                | (inputs.fault_bits & ~_LOCAL_FAULT_MASK)
+            ) & 0xFFFF
+
             self._snap = _StateSnapshot(
                 position=inputs.position,
                 normal_available=inputs.normal_available,
                 emergency_available=inputs.emergency_available,
                 engine_start_calling=inputs.engine_start_calling,
                 ats_mode=inputs.ats_mode,
-                fault_bits=inputs.fault_bits,
+                fault_bits=merged_fault_bits,
                 last_transfer_to_gen_ts=new_last_to_gen,
                 last_retransfer_to_util_ts=new_last_to_util,
                 transfer_count_lifetime=new_lifetime,
@@ -395,6 +410,13 @@ class RegisterStore:
 
     def _persist_async_safe(self) -> None:
         """Snapshot persisted fields under the lock, then write outside.
+
+        When running on an asyncio event loop (the production case), the
+        actual file write (including fsync, which can stall 50–200 ms on
+        a microSD) is offloaded to the loop's default executor so the
+        10 Hz sampling loop is not blocked. Callers from a synchronous
+        context (unit tests) get a synchronous save.
+
         Catches I/O errors so a flaky disk never crashes the service.
         """
         with self._lock:
@@ -403,6 +425,14 @@ class RegisterStore:
                 last_transfer_to_gen_ts=self._snap.last_transfer_to_gen_ts,
                 last_retransfer_to_util_ts=self._snap.last_retransfer_to_util_ts,
             )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._save_blocking(persisted)
+            return
+        loop.run_in_executor(None, self._save_blocking, persisted)
+
+    def _save_blocking(self, persisted: PersistedState) -> None:
         try:
             self._state_file.save(persisted)
         except OSError as e:

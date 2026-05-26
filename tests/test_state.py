@@ -1,12 +1,13 @@
 """Register store tests — ICD register layout, transitions, persistence."""
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
 
 from atspi.io_driver import InputSnapshot, OutputState
-from atspi.persistence import StateFile
+from atspi.persistence import PersistedState, StateFile
 from atspi.state import (
     ADDR_CMD_BYPASS_DELAY,
     ADDR_CMD_FORCE_TRANSFER,
@@ -159,6 +160,60 @@ def test_input_and_output_fault_bits():
     store.set_input_fault(False)
     bits = store.read_register(ADDR_FAULT_SUMMARY)
     assert not bits & FAULT_INPUT and bits & FAULT_OUTPUT
+
+
+def test_output_fault_survives_successful_sampling_cycle():
+    """A failed command sets OUTPUT_FAULT. The next successful read must NOT
+    clear it (only an explicit set_output_fault(False) should).
+    """
+    store = RegisterStore()
+    store.set_output_fault(True)
+    assert store.read_register(ADDR_FAULT_SUMMARY) & FAULT_OUTPUT
+
+    # Sampling loop applies a healthy snapshot (driver returns fault_bits=0).
+    store.apply_input_snapshot(_inputs(position="utility"))
+
+    assert store.read_register(ADDR_FAULT_SUMMARY) & FAULT_OUTPUT, (
+        "OUTPUT_FAULT must persist across successful input reads"
+    )
+
+
+def test_apply_input_snapshot_preserves_set_input_fault():
+    """set_input_fault(True) followed by apply_input_snapshot must not be
+    overwritten by the driver's reported fault_bits=0.
+    """
+    store = RegisterStore()
+    store.set_input_fault(True)
+    store.apply_input_snapshot(_inputs(position="utility"))
+    assert store.read_register(ADDR_FAULT_SUMMARY) & FAULT_INPUT
+
+
+def test_driver_fault_bits_merge_with_local_bits():
+    """Driver-reported bits (MODE_UNKNOWN, CALIBRATION) merge with locally-
+    managed FAULT_INPUT / FAULT_OUTPUT.
+    """
+    from atspi.state import FAULT_CALIBRATION, FAULT_MODE_UNKNOWN
+    store = RegisterStore()
+    store.set_output_fault(True)
+    store.apply_input_snapshot(
+        _inputs(position="utility", fault_bits=FAULT_MODE_UNKNOWN | FAULT_CALIBRATION)
+    )
+    bits = store.read_register(ADDR_FAULT_SUMMARY)
+    assert bits & FAULT_OUTPUT
+    assert bits & FAULT_MODE_UNKNOWN
+    assert bits & FAULT_CALIBRATION
+
+
+def test_driver_cannot_set_local_fault_bits():
+    """The driver's reported fault_bits must not be able to set/clear the
+    bits the orchestrator owns. If a driver buggily reports FAULT_INPUT,
+    we ignore that bit from the driver (orchestrator decides).
+    """
+    store = RegisterStore()
+    # Buggy driver reports FAULT_INPUT in its snapshot. Orchestrator state
+    # says no input fault. Result: FAULT_INPUT stays 0.
+    store.apply_input_snapshot(_inputs(position="utility", fault_bits=FAULT_INPUT))
+    assert not (store.read_register(ADDR_FAULT_SUMMARY) & FAULT_INPUT)
 
 
 def test_position_encoding():
