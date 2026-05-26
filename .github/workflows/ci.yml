@@ -43,6 +43,82 @@ jobs:
       - name: Test
         run: python -m pytest tests/ -v
 
+  soak:
+    # End-to-end startup smoke: prove the service actually boots, serves a
+    # Modbus read, and exits cleanly on SIGTERM. Catches regressions in
+    # __main__'s wiring that unit tests can't see (e.g. a lost call to the
+    # shutdown coordinator).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Write config
+        run: |
+          mkdir -p /tmp/atspi
+          cat > /tmp/atspi/config.yaml <<'EOF'
+          modbus_server:
+            host: 127.0.0.1
+            port: 5502
+            unit_id: 1
+          io:
+            driver: mock
+          site:
+            unit_id: 23
+          persistence:
+            state_file: /tmp/atspi/state.json
+          EOF
+
+      - name: Start, probe, and stop atspi
+        run: |
+          set -euxo pipefail
+          atspi --config /tmp/atspi/config.yaml > /tmp/atspi/log 2>&1 &
+          ATSPI_PID=$!
+          trap "kill -TERM $ATSPI_PID 2>/dev/null || true; wait $ATSPI_PID 2>/dev/null || true" EXIT
+          # Wait up to 10 s for the listener.
+          for _ in $(seq 1 50); do
+            if python -c "import socket; s=socket.socket(); s.settimeout(0.3); s.connect(('127.0.0.1', 5502)); s.close()" 2>/dev/null; then
+              break
+            fi
+            sleep 0.2
+          done
+          # Confirm a real Modbus read succeeds end-to-end.
+          python -m pip install --quiet 'pymodbus>=3.7.4,<3.8'
+          python - <<'PY'
+          import asyncio
+          from pymodbus.client import AsyncModbusTcpClient
+          async def main():
+              c = AsyncModbusTcpClient(host='127.0.0.1', port=5502)
+              await c.connect()
+              # ADDR_UNIT_ID = 0x0035 → site.unit_id (23)
+              r = await c.read_holding_registers(address=0x0035, count=1, slave=1)
+              assert not r.isError(), r
+              assert r.registers == [23], r.registers
+              c.close()
+          asyncio.run(main())
+          PY
+          # Clean shutdown on SIGTERM, non-zero exit means the wiring is wrong.
+          kill -TERM $ATSPI_PID
+          wait $ATSPI_PID
+          RC=$?
+          trap - EXIT
+          echo "atspi exit code: $RC"
+          test "$RC" = "0"
+
+      - name: Dump service log on failure
+        if: failure()
+        run: cat /tmp/atspi/log || true
+
   audit:
     # Dependency vulnerability scan — informational, doesn't gate merges.
     runs-on: ubuntu-latest

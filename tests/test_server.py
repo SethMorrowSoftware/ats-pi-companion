@@ -3,8 +3,12 @@ through to the store, and dispatches command intents.
 """
 from __future__ import annotations
 
+import asyncio
+
+import pytest
+
 from atspi.io_driver import InputSnapshot
-from atspi.server import _make_data_block
+from atspi.server import _GuardedSlaveContext, _make_data_block, start_server
 from atspi.state import (
     ADDR_CMD_BYPASS_DELAY,
     ADDR_CMD_FORCE_TRANSFER,

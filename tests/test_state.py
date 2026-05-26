@@ -1,13 +1,12 @@
 """Register store tests — ICD register layout, transitions, persistence."""
 from __future__ import annotations
 
-import asyncio
 import time
 
 import pytest
 
 from atspi.io_driver import InputSnapshot, OutputState
-from atspi.persistence import PersistedState, StateFile
+from atspi.persistence import StateFile
 from atspi.state import (
     ADDR_CMD_BYPASS_DELAY,
     ADDR_CMD_FORCE_TRANSFER,
@@ -139,7 +138,10 @@ def test_24h_count_evicts_stale_entries_at_startup(tmp_path, monkeypatch):
     assert s2.read_register(ADDR_TRANSFER_COUNT_LIFETIME + 1) == 1
 
 
-def test_write_register_returns_command_intent():
+def _store_in_auto() -> RegisterStore:
+    """RegisterStore seeded with one AUTO-mode sampling cycle, so command
+    writes are accepted (write_register rejects in "unknown" mode).
+    """
     store = RegisterStore()
     store.apply_input_snapshot(_inputs(position="utility"))
     return store

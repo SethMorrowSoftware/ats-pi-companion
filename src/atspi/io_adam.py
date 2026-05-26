@@ -242,7 +242,7 @@ class IOAdamDriver:
         # pulse runs to its scheduled completion without being re-triggered
         # or extended.
         slot = "_test_release_task" if do_index == DO_TEST else "_bypass_release_task"
-        prior = getattr(self, slot, None)
+        prior = getattr(self, slot)
         if prior is not None and not prior.done():
             log.debug("ADAM: %s already pulsing; ignoring re-trigger", name)
             return
@@ -253,12 +253,6 @@ class IOAdamDriver:
         self._record_commanded(do_index, True)
         log.info("ADAM: pulsing %s for %d ms", name, ms)
 
-        # Schedule the auto-release. Cancel a prior release task on the
-        # same line so a re-issued pulse extends, not double-clears.
-        slot = "_test_release_task" if do_index == DO_TEST else "_bypass_release_task"
-        prior = getattr(self, slot, None)
-        if prior is not None and not prior.done():
-            prior.cancel()
         setattr(self, slot, asyncio.create_task(self._release(coil, do_index, name, ms)))
 
     async def _release(self, coil: int, do_index: int, name: str, after_ms: int) -> None:

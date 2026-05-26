@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import logging
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
@@ -82,7 +81,7 @@ def build_status(store: RegisterStore, watchdog: SafetyWatchdog) -> dict[str, An
     position_value = store.read_register(ADDR_POSITION)
     mode_value = store.read_register(ADDR_ATS_MODE)
     fault_bits = store.read_register(ADDR_FAULT_SUMMARY)
-    last_read_age_s = time.monotonic() - watchdog._last_read_monotonic  # noqa: SLF001
+    last_read_age_s, released = watchdog.snapshot()
     return {
         "service": "atspi",
         "version": __version__,
@@ -98,7 +97,7 @@ def build_status(store: RegisterStore, watchdog: SafetyWatchdog) -> dict[str, An
         "transfer_count_lifetime": _u32_from_pair(store, ADDR_TRANSFER_COUNT_LIFETIME),
         "transfer_count_24h": _u32_from_pair(store, ADDR_TRANSFER_COUNT_24H),
         "last_modbus_read_age_s": round(last_read_age_s, 2),
-        "watchdog_released": watchdog._released,  # noqa: SLF001
+        "watchdog_released": released,
     }
 
 
