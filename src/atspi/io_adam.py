@@ -238,6 +238,15 @@ class IOAdamDriver:
     # ─── Internal: pulse handling ─────────────────────────────────────
 
     async def _pulse(self, do_index: int, name: str, duration_ms: int) -> None:
+        # ICD §6: writes during an active pulse are IGNORED — the original
+        # pulse runs to its scheduled completion without being re-triggered
+        # or extended.
+        slot = "_test_release_task" if do_index == DO_TEST else "_bypass_release_task"
+        prior = getattr(self, slot, None)
+        if prior is not None and not prior.done():
+            log.debug("ADAM: %s already pulsing; ignoring re-trigger", name)
+            return
+
         ms = max(PULSE_MIN_MS, min(PULSE_MAX_MS, int(duration_ms)))
         coil = DO_COIL_BASE + do_index
         await self._write_coil(coil, True)
@@ -266,6 +275,17 @@ class IOAdamDriver:
     async def _ensure_connected(self) -> None:
         if self._connected and self._client is not None and self._client.connected:
             return
+        # If a previous read/write set self._connected=False, the pymodbus
+        # client may be in a half-open state where .connect() returns True
+        # but subsequent operations still time out. Close and recreate so
+        # we start from a clean socket. (We don't recreate when _connected
+        # is still True; in that case the client just needs reconnect().)
+        if not self._connected and self._client is not None:
+            try:
+                self._client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._client = None
         await self.connect()
         if not self._connected:
             raise ConnectionError(f"ADAM-6060 unreachable at {self.host}:{self.port}")

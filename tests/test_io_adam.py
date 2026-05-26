@@ -7,6 +7,8 @@ itself is documented in docs/SPEC.md §8 phase E.
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import pytest
@@ -26,6 +28,18 @@ from atspi.io_adam import (
     DO_TEST,
     IOAdamDriver,
 )
+
+
+async def _wait_for(predicate: Callable[[], bool], timeout: float = 2.0) -> None:
+    """Poll predicate at 20 ms intervals until it returns truthy or timeout
+    expires. Replaces fixed-sleep waits that became flaky on slow CI runners.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"predicate did not become true within {timeout}s")
 
 
 @dataclass
@@ -147,17 +161,57 @@ async def test_drive_outputs_test_pulse_clamps_and_self_clears(driver):
     await driver.drive_outputs(test_pulse_ms=100)
     assert (DO_COIL_BASE + DO_TEST, True) in fake.writes
 
-    # Wait for the release to fire (clamped to 500 ms).
-    await asyncio.sleep(0.7)
-    assert (DO_COIL_BASE + DO_TEST, False) in fake.writes
+    # Poll for the release write (driver clamps to 500 ms min).
+    await _wait_for(lambda: (DO_COIL_BASE + DO_TEST, False) in fake.writes)
 
 
 async def test_drive_outputs_bypass_pulse_self_clears(driver):
     fake = driver._client  # noqa: SLF001
     await driver.drive_outputs(bypass_delay_pulse_ms=500)
     assert (DO_COIL_BASE + DO_BYPASS_DELAY, True) in fake.writes
+    await _wait_for(lambda: (DO_COIL_BASE + DO_BYPASS_DELAY, False) in fake.writes)
+
+
+async def test_test_pulse_re_trigger_during_active_is_ignored(driver):
+    """ICD §6: 'Writes while cmd_test_active=1 are ignored
+    (no re-triggering mid-pulse).'
+    """
+    fake = driver._client  # noqa: SLF001
+    # Start a max-length pulse so we have time to attempt a re-trigger.
+    await driver.drive_outputs(test_pulse_ms=1500)
+    first_writes = list(fake.writes)
+    # Issue another pulse while the first is in flight.
+    await driver.drive_outputs(test_pulse_ms=1500)
+    # No additional coil write should have happened — the second call is a no-op.
+    assert fake.writes == first_writes, (
+        "Re-trigger during active pulse must not write to the coil again"
+    )
+    # Original pulse still releases on schedule.
+    await asyncio.sleep(1.7)
+    assert (DO_COIL_BASE + DO_TEST, False) in fake.writes
+
+
+async def test_bypass_pulse_re_trigger_during_active_is_ignored(driver):
+    """Same idempotency rule for bypass_delay (ICD §6)."""
+    fake = driver._client  # noqa: SLF001
+    await driver.drive_outputs(bypass_delay_pulse_ms=1500)
+    first_writes = list(fake.writes)
+    await driver.drive_outputs(bypass_delay_pulse_ms=1500)
+    assert fake.writes == first_writes
+
+
+async def test_test_pulse_can_be_re_issued_after_completion(driver):
+    """After the original pulse self-clears, a new pulse must be accepted."""
+    fake = driver._client  # noqa: SLF001
+    await driver.drive_outputs(test_pulse_ms=500)
+    # Wait long enough for the auto-release to fire.
     await asyncio.sleep(0.7)
-    assert (DO_COIL_BASE + DO_BYPASS_DELAY, False) in fake.writes
+    writes_after_first = len(fake.writes)
+    # Now a fresh pulse must take effect.
+    await driver.drive_outputs(test_pulse_ms=500)
+    assert len(fake.writes) > writes_after_first, (
+        "After the original pulse completed, a new pulse must drive the coil"
+    )
 
 
 async def test_read_output_state_decodes_bits(driver):
