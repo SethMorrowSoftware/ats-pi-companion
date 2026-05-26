@@ -1,6 +1,8 @@
 """Smoke tests — sanity checks that everything imports and basic plumbing works."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 import atspi
@@ -22,6 +24,41 @@ def test_default_config_loads(tmp_path):
     assert isinstance(cfg, Config)
     assert cfg.modbus_server.port == 5020
     assert cfg.site.unit_id == 99
+
+
+def test_config_rejects_typo_in_top_level_key(tmp_path):
+    """An ops typo at the top level used to be silently ignored. Now fails fast."""
+    from atspi.config import ConfigError
+    p = tmp_path / "cfg.yaml"
+    p.write_text("modbussserver:\n  port: 5020\n")  # double-s typo
+    with pytest.raises(ConfigError, match="modbussserver"):
+        load_config(p)
+
+
+def test_config_rejects_typo_in_nested_key(tmp_path):
+    """Nested-key typos also fail fast, with the dotted path in the message."""
+    from atspi.config import ConfigError
+    p = tmp_path / "cfg.yaml"
+    p.write_text("io:\n  drivr: mock\n")  # 'drivr' instead of 'driver'
+    with pytest.raises(ConfigError, match="io.drivr"):
+        load_config(p)
+
+
+def test_config_rejects_non_mapping_root(tmp_path):
+    from atspi.config import ConfigError
+    p = tmp_path / "cfg.yaml"
+    p.write_text("- a\n- b\n")  # YAML list, not a mapping
+    with pytest.raises(ConfigError, match="must be a mapping"):
+        load_config(p)
+
+
+def test_config_accepts_empty_file(tmp_path):
+    """An empty YAML file loads as all-defaults."""
+    p = tmp_path / "cfg.yaml"
+    p.write_text("")
+    cfg = load_config(p)
+    assert cfg.modbus_server.port == 502
+    assert cfg.io.driver == "mock"
 
 
 @pytest.mark.asyncio
@@ -58,3 +95,28 @@ def test_register_store_reserved_addresses_read_zero():
     assert store.read_register(0x0050) == 0
     assert store.read_register(0x00FF) == 0
     assert store.read_register(0x0200) == 0
+
+
+@pytest.mark.asyncio
+async def test_mock_pulse_re_trigger_during_active_is_ignored():
+    """ICD §6: mock driver must also enforce pulse idempotency."""
+    d = IOMockDriver()
+    await d.connect()
+    await d.drive_outputs(test_pulse_ms=1500)
+    out_first = await d.read_output_state()
+    assert out_first.test_active is True
+    # Re-trigger mid-pulse — must not extend or restart.
+    await d.drive_outputs(test_pulse_ms=1500)
+    # Wait less than the original pulse but past where a re-trigger would push it.
+    await asyncio.sleep(0.6)
+    # Pulse is still in its original window.
+    out_mid = await d.read_output_state()
+    assert out_mid.test_active is True
+    # After the original pulse window completes, it must self-clear.
+    await asyncio.sleep(1.2)
+    out_after = await d.read_output_state()
+    assert out_after.test_active is False, (
+        "Original pulse must release on its original schedule, "
+        "not be extended by the second drive_outputs call"
+    )
+    await d.close()

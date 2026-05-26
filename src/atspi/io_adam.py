@@ -78,6 +78,12 @@ PULSE_MAX_MS = 1500
 # so a 10 Hz sampling loop reliably catches it.
 TRANSFERRING_HOLD_S = 2.0
 
+# After driving a relay, allow up to this long for the actual coil read-back
+# to catch up before flagging a mismatch. The ADAM's internal scan cycle is
+# nominally ≤100 ms; 500 ms gives generous headroom for one full Modbus
+# read/write round-trip plus the relay's own actuation delay.
+OUTPUT_SETTLING_S = 0.5
+
 
 def _bit_pulse(timestamp_mono: float | None, hold_s: float, now_mono: float) -> bool:
     if timestamp_mono is None:
@@ -107,6 +113,12 @@ class IOAdamDriver:
         # report "transferring" position for a brief hold window since
         # the contact is a momentary pulse, not a maintained state.
         self._load_disconnect_seen_mono: float | None = None
+
+        # Stuck-relay detection. Tracks the last value commanded to each
+        # DO and the monotonic timestamp of that command. Read by
+        # check_output_consistency() to compare against actual read-back.
+        # Pulse release tasks update this with (False, now) when they fire.
+        self._commanded_do: dict[int, tuple[bool, float]] = {}
 
     async def connect(self) -> bool:
         if self._client is None:
@@ -181,19 +193,64 @@ class IOAdamDriver:
             await self._pulse(DO_TEST, "test", test_pulse_ms)
         if inhibit is not None:
             await self._write_coil(DO_COIL_BASE + DO_INHIBIT, bool(inhibit))
+            self._record_commanded(DO_INHIBIT, bool(inhibit))
             log.info("ADAM: inhibit %s", "ASSERT" if inhibit else "RELEASE")
         if force_transfer is not None:
             await self._write_coil(DO_COIL_BASE + DO_FORCE_TRANSFER, bool(force_transfer))
+            self._record_commanded(DO_FORCE_TRANSFER, bool(force_transfer))
             log.info("ADAM: force_transfer %s", "ASSERT" if force_transfer else "RELEASE")
         if bypass_delay_pulse_ms is not None:
             await self._pulse(DO_BYPASS_DELAY, "bypass_delay", bypass_delay_pulse_ms)
 
+    def _record_commanded(self, do_index: int, value: bool) -> None:
+        """Note what we just drove onto ``do_index`` for stuck-relay detection."""
+        self._commanded_do[do_index] = (value, time.monotonic())
+
+    def check_output_consistency(self, actual: OutputState) -> bool:
+        """Compare ``actual`` (just read from the ADAM) against the last
+        commanded state of each DO. Within OUTPUT_SETTLING_S of a write
+        any mismatch is tolerated (relay actuation + ADAM scan latency).
+        Past that window, a mismatch indicates a stuck relay or
+        miswired DO.
+        """
+        now = time.monotonic()
+        actual_for_do = {
+            DO_TEST: actual.test_active,
+            DO_FORCE_TRANSFER: actual.force_transfer_active,
+            DO_INHIBIT: actual.inhibit_active,
+            DO_BYPASS_DELAY: actual.bypass_delay_active,
+        }
+        for do_index, (cmd_value, cmd_ts) in self._commanded_do.items():
+            if now - cmd_ts < OUTPUT_SETTLING_S:
+                continue
+            actual_value = actual_for_do.get(do_index)
+            if actual_value is None:
+                continue
+            if actual_value != cmd_value:
+                log.warning(
+                    "ADAM DO%d read-back mismatch: commanded=%s actual=%s "
+                    "(%.1fs since command) — possible stuck relay",
+                    do_index, cmd_value, actual_value, now - cmd_ts,
+                )
+                return False
+        return True
+
     # ─── Internal: pulse handling ─────────────────────────────────────
 
     async def _pulse(self, do_index: int, name: str, duration_ms: int) -> None:
+        # ICD §6: writes during an active pulse are IGNORED — the original
+        # pulse runs to its scheduled completion without being re-triggered
+        # or extended.
+        slot = "_test_release_task" if do_index == DO_TEST else "_bypass_release_task"
+        prior = getattr(self, slot, None)
+        if prior is not None and not prior.done():
+            log.debug("ADAM: %s already pulsing; ignoring re-trigger", name)
+            return
+
         ms = max(PULSE_MIN_MS, min(PULSE_MAX_MS, int(duration_ms)))
         coil = DO_COIL_BASE + do_index
         await self._write_coil(coil, True)
+        self._record_commanded(do_index, True)
         log.info("ADAM: pulsing %s for %d ms", name, ms)
 
         # Schedule the auto-release. Cancel a prior release task on the
@@ -202,12 +259,13 @@ class IOAdamDriver:
         prior = getattr(self, slot, None)
         if prior is not None and not prior.done():
             prior.cancel()
-        setattr(self, slot, asyncio.create_task(self._release(coil, name, ms)))
+        setattr(self, slot, asyncio.create_task(self._release(coil, do_index, name, ms)))
 
-    async def _release(self, coil: int, name: str, after_ms: int) -> None:
+    async def _release(self, coil: int, do_index: int, name: str, after_ms: int) -> None:
         try:
             await asyncio.sleep(after_ms / 1000.0)
             await self._write_coil(coil, False)
+            self._record_commanded(do_index, False)
             log.info("ADAM: pulsed %s released", name)
         except asyncio.CancelledError:
             pass
@@ -217,6 +275,17 @@ class IOAdamDriver:
     async def _ensure_connected(self) -> None:
         if self._connected and self._client is not None and self._client.connected:
             return
+        # If a previous read/write set self._connected=False, the pymodbus
+        # client may be in a half-open state where .connect() returns True
+        # but subsequent operations still time out. Close and recreate so
+        # we start from a clean socket. (We don't recreate when _connected
+        # is still True; in that case the client just needs reconnect().)
+        if not self._connected and self._client is not None:
+            try:
+                self._client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._client = None
         await self.connect()
         if not self._connected:
             raise ConnectionError(f"ADAM-6060 unreachable at {self.host}:{self.port}")

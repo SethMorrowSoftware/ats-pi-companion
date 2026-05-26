@@ -60,6 +60,13 @@ async def _sampling_loop(driver: IODriver, store: RegisterStore) -> None:
             store.apply_input_snapshot(inputs)
             store.apply_output_state(outputs)
             store.set_input_fault(False)
+            # Stuck-relay detection: compare actual driver state against
+            # the last commanded state. The driver enforces its own
+            # settling window so a write that hasn't physically actuated
+            # yet isn't flagged. OUTPUT_FAULT stays set until cleared by
+            # the next successful drive_outputs() in _dispatch_command.
+            if not driver.check_output_consistency(outputs):
+                store.set_output_fault(True)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
@@ -86,11 +93,13 @@ async def _dispatch_command(driver: IODriver, store: RegisterStore, intent: Comm
 
 
 async def _amain(args: argparse.Namespace) -> int:
-    cfg = load_config(args.config)
+    # Configure logging FIRST so config-load errors and any messages from
+    # driver/store construction land in the right place.
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
+    cfg = load_config(args.config)
     log.info("atspi v%s starting (unit_id=%d)", __version__, cfg.site.unit_id)
 
     driver = _build_io_driver(cfg)
@@ -138,9 +147,14 @@ async def _amain(args: argparse.Namespace) -> int:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
 
+    # Tasks that MUST run for the service to be operational. If any of these
+    # exits — for any reason — the service is degraded and systemd should
+    # restart us. The notify task is excluded: it returns cleanly when not
+    # under systemd, which is normal.
+    critical_tasks: list[asyncio.Task] = [sample_task, watchdog_task, server_task]
+
     notify_ready()
     log.info("atspi is running — Ctrl-C to stop")
-    await stop.wait()
 
     log.info("atspi shutting down")
     if health_server is not None:
@@ -157,6 +171,102 @@ async def _amain(args: argparse.Namespace) -> int:
         except (asyncio.CancelledError, Exception):
             pass
     await driver.close()
+    # Non-zero exit code on critical-task failure so systemd's Restart=on-failure
+    # kicks in immediately rather than waiting for the WatchdogSec timeout.
+    return 0 if reason == "shutdown" else 1
+
+
+async def _wait_for_shutdown_or_failure(
+    stop: asyncio.Event,
+    critical_tasks: list[asyncio.Task],
+) -> str:
+    """Return ``'shutdown'`` when the stop event fires; otherwise return the
+    name of the first critical task to exit. Either outcome means the main
+    loop should tear down.
+    """
+    stop_task = asyncio.create_task(stop.wait(), name="stop-waiter")
+    try:
+        done, _pending = await asyncio.wait(
+            {stop_task, *critical_tasks},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    finally:
+        if not stop_task.done():
+            stop_task.cancel()
+
+    # Prefer reporting a dead critical task over a normal shutdown signal,
+    # since the failure is the more interesting cause.
+    for t in done:
+        if t is stop_task:
+            continue
+        try:
+            t.result()
+            log.error("critical task %s exited cleanly (expected to run forever)", t.get_name())
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("critical task %s died", t.get_name())
+        return t.get_name()
+
+    return "shutdown"
+
+
+def _export_state(config_path: str, target_path: str) -> int:
+    """Copy the current state.json to ``target_path``. Loads through
+    StateFile so an unreadable source bails out before clobbering the
+    target.
+    """
+    cfg = load_config(config_path)
+    src = StateFile(cfg.persistence.state_file)
+    persisted = src.load()  # falls back to zeros on missing/corrupt
+    dst = StateFile(target_path)
+    dst.save(persisted)
+    print(
+        f"exported state to {target_path}: "
+        f"lifetime={persisted.transfer_count_lifetime}",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _import_state(config_path: str, source_path: str) -> int:
+    """Validate ``source_path`` as a PersistedState and copy it to the
+    configured state file. Refuses to import if the source is unreadable
+    (would otherwise wipe the live state with zeros).
+    """
+    import json as _json
+    from pathlib import Path
+    cfg = load_config(config_path)
+    src_p = Path(source_path)
+    if not src_p.exists():
+        print(f"import-state: source file not found: {source_path}", file=sys.stderr)
+        return 2
+    # StateFile.load() returns zeros on corruption — that's the right
+    # behaviour for normal startup, but for an explicit import we want
+    # fail-fast so we don't silently zero the live state.
+    with src_p.open() as f:
+        try:
+            _json.load(f)
+        except _json.JSONDecodeError as e:
+            print(
+                f"import-state: refusing to import; source is not valid JSON ({e})",
+                file=sys.stderr,
+            )
+            return 2
+    src = StateFile(source_path)
+    persisted = src.load()
+    dst = StateFile(cfg.persistence.state_file)
+    dst.save(persisted)
+    print(
+        f"imported state from {source_path} to {cfg.persistence.state_file}: "
+        f"lifetime={persisted.transfer_count_lifetime}",
+        file=sys.stderr,
+    )
+    print(
+        "NOTE: if atspi is currently running, restart it for the new state to "
+        "take effect — the in-memory snapshot is loaded once at startup.",
+        file=sys.stderr,
+    )
     return 0
 
 
@@ -168,8 +278,28 @@ def main() -> None:
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
+    # State-management one-shots. Each runs and exits without starting the
+    # service. Useful for: backups before deploys, cloning a unit to a
+    # spare Pi, recovering after a microSD swap.
+    state_grp = ap.add_mutually_exclusive_group()
+    state_grp.add_argument(
+        "--export-state", metavar="PATH",
+        help="Copy the live state.json to PATH and exit. Validates JSON "
+             "before writing.",
+    )
+    state_grp.add_argument(
+        "--import-state", metavar="PATH",
+        help="Replace state.json with the contents of PATH and exit. "
+             "Stop the service first; the live process loads state once at "
+             "startup.",
+    )
     ap.add_argument("--version", action="version", version=f"atspi {__version__}")
     args = ap.parse_args()
+
+    if args.export_state:
+        sys.exit(_export_state(args.config, args.export_state))
+    if args.import_state:
+        sys.exit(_import_state(args.config, args.import_state))
     sys.exit(asyncio.run(_amain(args)))
 
 
