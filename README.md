@@ -1,8 +1,17 @@
 # ATS-Pi Companion
 
-Dedicated Raspberry Pi service that physically observes an ASCO Series 300
-Power Transfer Switch and exposes its state to the GenWatch dashboard
-over Modbus TCP.
+> Companion service to **[GenWatch](https://github.com/SethMorrowSoftware/GenWatch)**.
+> Implements the wire contract defined in
+> [`GenWatch/docs/integrations/ats-pi-icd.md`](https://github.com/SethMorrowSoftware/GenWatch/blob/main/docs/integrations/ats-pi-icd.md)
+> (ICD v1.0).
+
+A dedicated Raspberry Pi service that physically observes an
+**ASCO Series 300 Power Transfer Switch** and exposes its state — plus
+a small set of safe write commands — to GenWatch over Modbus TCP. The
+ATS contacts wire into an Advantech ADAM-6060 digital-I/O module; this
+service reads the ADAM, publishes ICD-shaped registers, and applies the
+ICD's safety rules (mode-policy enforcement, 30-second comms-loss
+auto-release, stuck-relay detection).
 
 ```
         ASCO 300 ATS                          GenWatch Pi
@@ -18,71 +27,40 @@ over Modbus TCP.
        └──────────┘
 ```
 
-## What this project does
+## Scope
 
-- Reads the ASCO's dry contacts: source availability (Normal / Emergency),
-  switch position (On Normal / On Emergency), engine-start sense
-- Exposes these as Modbus TCP holding registers per the ICD
-- Accepts write commands from GenWatch (Test, Inhibit, Force Transfer,
-  Bypass Delay) and drives the corresponding ASCO inputs with correct
-  pulse timing and safety auto-release
-- Reports its own health (input/output faults, ICD version, uptime)
+**This project does:**
 
-## What this project does NOT do
+- Read the ASCO's dry contacts (source availability, switch position,
+  engine-start sense) through the ADAM-6060
+- Publish them as Modbus TCP holding registers per the ICD
+- Accept ICD command writes (Test, Inhibit, Force Transfer, Bypass
+  Delay) with mode-policy enforcement and ICD-conformant pulse timing
+- Auto-release maintained commands after 30 ± 5 s of comms silence
+  (ICD §8.3)
+- Report its own health (input/output faults, ICD version, uptime,
+  lifetime / 24h transfer counts)
 
-- It does not provide its own UI. All operator-visible state and
-  commands live in GenWatch.
-- It does not directly observe the generator (that's the H-100 → GenWatch
-  path).
-- It does not implement any building-side energy metering. If a meter
-  is added later, the ICD can be extended (minor-version bump).
+**This project does NOT:**
+
+- Have its own UI — all operator-visible state and controls live in
+  GenWatch
+- Observe the generator directly — that's the H-100 → GenWatch path
+- Implement building-side metering — ICD can extend later (minor bump)
 
 ## Interface contract
 
-The wire protocol and semantic contract are **frozen** in the
-**ICD document**, which lives in the GenWatch repo:
+The ICD is the source of truth for every register address, encoding,
+write semantics, and safety guarantee:
 
-→ [`docs/integrations/ats-pi-icd.md`](https://github.com/SethMorrowSoftware/GenWatch/blob/main/docs/integrations/ats-pi-icd.md)
+→ [`GenWatch/docs/integrations/ats-pi-icd.md`](https://github.com/SethMorrowSoftware/GenWatch/blob/main/docs/integrations/ats-pi-icd.md)
 
-You MUST read this before implementing any of the server. Every
-register address, encoding, and timing requirement is specified there.
+Conformance is verified end-to-end in `tests/test_icd_contract.py`
+(44 tests against a real pymodbus client driving the real server).
+Two documented deviations (Modbus exception codes 0x02 vs ICD's
+0x03/0x04) are explained in `CHANGELOG.md`.
 
-## Project layout
-
-```
-src/atspi/
-  __init__.py       — package, version
-  __main__.py       — CLI entry: `python -m atspi --config ...`
-  config.py         — YAML config loader
-  server.py         — Modbus TCP server, mounts the register store
-  state.py          — internal state model (mirrors ICD §5 register layout)
-  safety.py         — 30-second comms-loss auto-release per ICD §8.3
-  io_driver.py      — abstract I/O base class
-  io_mock.py        — mock driver for dev/testing without hardware
-  io_adam.py        — Advantech ADAM-6060 driver
-  persistence.py    — atomic JSON state file for lifetime counters
-  notify.py         — sd_notify integration (systemd Type=notify)
-
-docs/
-  SPEC.md           — implementation specification (companion to the ICD)
-  HARDWARE.md       — BOM, wiring, install
-  DEVELOPMENT.md    — getting started, running tests, manual testing
-  RUNBOOK.md        — field troubleshooting (read this at 2am)
-
-tests/
-  test_smoke.py     — imports, basic config load
-  test_state.py     — register store + transitions + persistence
-  test_safety.py    — comms-loss auto-release
-  test_io_adam.py   — ADAM driver bit decoding (against a fake client)
-  test_server.py    — data block routing + command dispatch
-  test_persistence.py — atomic write, corruption recovery
-  test_notify.py    — sd_notify socket protocol
-
-systemd/
-  atspi.service     — production systemd unit (Type=notify, watchdog)
-```
-
-## Quick start (dev)
+## Quick start (no hardware)
 
 ```bash
 git clone https://github.com/SethMorrowSoftware/ats-pi-companion.git
@@ -90,35 +68,54 @@ cd ats-pi-companion
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# Run with the mock I/O driver — no hardware required
-cp config.example.yaml config.yaml
+cp config.example.yaml config.yaml      # defaults to driver: mock
 atspi --config config.yaml
 
-# In another terminal, test reads against it:
+# In another shell:
 modpoll -m tcp -a 1 -r 1 -c 6 127.0.0.1
+# → [0, 1, 1, 0, 0, 0]  (utility, both sources available, auto, no faults)
 ```
 
-## Status
+The mock driver responds to `SIGUSR1` (cycles position
+`utility → generator → transferring → unknown`) and `SIGUSR2` (toggles
+`normal_available` + mirrored `engine_start_calling`), so you can drive
+a running service through state transitions without recompiling.
 
-**Production-ready in software; bench verification of the ADAM-6060
-driver register map is the only remaining task before site install.**
+## Production deployment
 
-What's done:
+The literal command sequence from "Pi configured" to "GenWatch sees
+the ATS" is in [`docs/HARDWARE.md §7`](./docs/HARDWARE.md), including
+the five most likely first-boot gotchas. If something goes sideways
+at 2am, [`docs/RUNBOOK.md`](./docs/RUNBOOK.md) is the field guide.
 
-- Register store, sampling loop, Modbus TCP server, command dispatch
-- Safety watchdog (ICD §8.3 30 s comms-loss auto-release)
-- ADAM-6060 driver — implemented against the documented register map,
-  needs bench verification per `docs/SPEC.md §8 Phase E`
-- Persistence for `transfer_count_lifetime` (atomic JSON file)
-- 24h sliding-window transfer counter
-- systemd `Type=notify` with watchdog ping (60s)
-- Full unit test suite, ruff-clean, CI on every PR
+## Project layout
 
-The companion **GenWatch consumer** for this service is already
-shipped (`ats.enabled: true` in GenWatch's config). It will fall back
-to H-100-derived loadSource until this project starts responding on
-its configured host/port.
+```
+src/atspi/
+  __init__.py        package + ICD_VERSION = (1, 0)
+  __main__.py        CLI entry; orchestrates sampling, server, watchdog
+  config.py          strict YAML loader (rejects unknown keys)
+  server.py          Modbus TCP server (pymodbus 3.7.x)
+  state.py           register store — ICD §5 register layout
+  safety.py          30-s comms-loss auto-release (ICD §8.3)
+  io_driver.py       abstract I/O Protocol
+  io_mock.py         dev/test driver with SIGUSR1/2 controls
+  io_adam.py         Advantech ADAM-6060 driver
+  bench.py           `atspi-bench` interactive commissioning CLI
+  persistence.py     atomic-rename JSON state file
+  health.py          optional localhost JSON /health endpoint
+  notify.py          sd_notify (systemd Type=notify)
+
+docs/
+  SPEC.md            implementation architecture
+  HARDWARE.md        BOM, wiring, install, commissioning checklist
+  DEVELOPMENT.md     dev environment, mock controls, test layout
+  RUNBOOK.md         field troubleshooting
+
+tests/               191 tests, ruff-clean, CI on every PR
+systemd/atspi.service production unit (Type=notify, WatchdogSec=60)
+```
 
 ## License
 
-MIT (matches GenWatch).
+MIT — matches GenWatch.

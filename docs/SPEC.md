@@ -4,7 +4,7 @@
 |---|---|
 | **Audience** | Engineer implementing the ATS-Pi server |
 | **Pre-reads** | [ICD](https://github.com/SethMorrowSoftware/GenWatch/blob/main/docs/integrations/ats-pi-icd.md) (mandatory), [HARDWARE.md](./HARDWARE.md), [DEVELOPMENT.md](./DEVELOPMENT.md) |
-| **Tracking issue** | TBD |
+| **Status** | Implemented; awaiting ADAM-6060 bench verification (Phase E) |
 
 This document describes **how** to implement the ATS-Pi to honor the
 ICD. The ICD specifies the wire-level contract — what GenWatch sees.
@@ -229,9 +229,21 @@ Per ICD §9.3:
 - **MUST reset on reboot:** `ats_pi_uptime_s` (per definition), all
   command registers (start in "no commands asserted" state per §9.3).
 
-Simplest implementation: a small JSON file at `/var/lib/atspi/state.json`
-written on each transition. Read at boot, default to zeros if missing
-or corrupt.
+Implementation: JSON file at `/var/lib/atspi/state.json` written on
+each transition. Atomic-rename + parent-directory fsync so a power
+loss either keeps the old file or shows the new one in full, never
+half-written. Read at boot, default to zeros on missing or corrupt.
+
+We persist one field beyond what the ICD requires: the 24-hour
+sliding window's individual transfer timestamps. ICD §1.3 says
+`transfer_count_24h` MAY reset on reboot, but persisting the window
+removes an ops papercut — an unrelated service restart no longer
+zeroes the daily count mid-day. Timestamps older than the 24 h cutoff
+are evicted at load time, so a long outage doesn't carry stale
+entries forward.
+
+See `persistence.py` and `test_persistence.py` for the atomic-write
+machinery and corruption-tolerance tests.
 
 ---
 
@@ -315,21 +327,26 @@ The implementation is complete when:
 
 ---
 
-## 10. Open design questions
+## 10. Resolved design decisions
 
-Notes for the implementer to resolve as they go:
+The original draft of this spec carried an "open questions" section.
+Each has since been resolved; recording the outcomes here so future
+readers know the rationale.
 
-- **State file vs SQLite for persistence.** JSON file is simpler;
-  SQLite is more robust against corruption. Recommendation: JSON for
-  v1, atomic-rename pattern (write to `.tmp`, rename), check JSON
-  parsability on read and fall back to zeros if corrupt.
-- **Watchdog timeout precision.** ICD says "30 ± 5 s" — implement
-  with 1 s polling granularity, document that real timing will be in
-  [29, 31] s. Add a metric counter for "auto-release fired" events
-  so we can spot operational anomalies.
-- **Output relay readback.** The ADAM-6060 has independent read-back
-  of its DO state — use that to detect a stuck relay (drive high, read
-  low → set `OUTPUT_FAULT` fault bit per ICD §5.1.1).
-- **Logging.** Default to systemd-journal-friendly logging (stdout,
-  no rotation). The ATS-Pi project owns its own log; GenWatch's
-  events feed is fed via the Modbus state changes, not via shared logs.
+- **Persistence format.** JSON file with atomic-rename + parent-dir
+  fsync. Falls back to zeros on missing/corrupt. SQLite was overkill
+  for a four-field record. See `persistence.py`.
+- **Watchdog timeout precision.** 1 s polling against
+  `time.monotonic()`. Real auto-release fires in `[30, 31] s`, well
+  inside ICD §8.3's `30 ± 5 s` window. The watchdog retries
+  `drive_outputs` every tick on failure so a transient ADAM blip
+  during the release event can't strand a maintained command.
+- **Output relay readback.** Implemented as commanded-vs-actual
+  comparison with a 500 ms settling window after each write
+  (`io_adam.check_output_consistency`). Mismatches outside the
+  window set `OUTPUT_FAULT` per ICD §5.1.1.
+- **Logging.** systemd-journal-friendly stdout, no rotation.
+  Log level via `--log-level` CLI flag — config-file log level was
+  considered and rejected (one fewer thing to keep in sync, and the
+  strict config loader would reject an unknown `logging:` section
+  anyway).
