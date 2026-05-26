@@ -95,3 +95,18 @@ class IODriver(Protocol):
         by the driver to enforce the contract on the wire.
         """
         ...
+
+    def check_output_consistency(self, actual: OutputState) -> bool:
+        """Compare the just-read driver state to what we last commanded.
+
+        Returns True if the driven outputs match the commanded state (or
+        if we're within a settling window after a recent write — relays
+        take time to physically respond). Returns False if a stuck relay
+        is suspected: e.g. we commanded ``inhibit=True``, settling window
+        has elapsed, and the read-back still shows it off.
+
+        Drivers that can't observe a separate read-back path (the mock,
+        any driver where the read literally returns what was written)
+        return True unconditionally — there's nothing to verify.
+        """
+        ...

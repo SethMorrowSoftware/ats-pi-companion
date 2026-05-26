@@ -171,6 +171,75 @@ async def test_read_output_state_decodes_bits(driver):
     assert out.bypass_delay_active is False
 
 
+# ─── Stuck-relay detection ───────────────────────────────────────────────
+
+
+async def test_check_output_consistency_passes_within_settling_window(driver):
+    """Right after a write, the ADAM may not yet reflect the new state.
+    The settling window suppresses false positives.
+    """
+    fake = driver._client  # noqa: SLF001
+    # Drive inhibit on, but pretend the read-back hasn't caught up yet.
+    await driver.drive_outputs(inhibit=True)
+    fake.do_bits[DO_INHIBIT] = False  # simulate "ADAM scan hasn't refreshed"
+    actual = await driver.read_output_state()
+    # Within settling window → no fault.
+    assert driver.check_output_consistency(actual) is True
+
+
+async def test_check_output_consistency_detects_stuck_relay(driver, monkeypatch):
+    """Past the settling window, a commanded-vs-actual mismatch is a
+    stuck-relay fault.
+    """
+    import atspi.io_adam as io_adam_mod
+    monkeypatch.setattr(io_adam_mod, "OUTPUT_SETTLING_S", 0.05)
+    fake = driver._client  # noqa: SLF001
+    # Drive inhibit on; relay sticks off (simulate broken DO 2).
+    await driver.drive_outputs(inhibit=True)
+    fake.do_bits[DO_INHIBIT] = False
+    await asyncio.sleep(0.1)  # exceed settling window
+    actual = await driver.read_output_state()
+    assert driver.check_output_consistency(actual) is False
+
+
+async def test_check_output_consistency_passes_when_relays_match(driver, monkeypatch):
+    """Past the settling window, matching commanded + actual → no fault."""
+    import atspi.io_adam as io_adam_mod
+    monkeypatch.setattr(io_adam_mod, "OUTPUT_SETTLING_S", 0.05)
+    # FakeClient mirrors writes into do_bits so actual==commanded.
+    await driver.drive_outputs(inhibit=True, force_transfer=False)
+    await asyncio.sleep(0.1)
+    actual = await driver.read_output_state()
+    assert driver.check_output_consistency(actual) is True
+
+
+async def test_check_output_consistency_returns_true_when_nothing_commanded(driver):
+    """Fresh driver, no commands issued — nothing to verify."""
+    actual = await driver.read_output_state()
+    assert driver.check_output_consistency(actual) is True
+
+
+async def test_check_output_consistency_tracks_pulse_release(driver, monkeypatch):
+    """After a pulse self-releases, the commanded state flips to False;
+    a still-asserted read-back becomes a stuck-relay fault.
+    """
+    import atspi.io_adam as io_adam_mod
+    monkeypatch.setattr(io_adam_mod, "OUTPUT_SETTLING_S", 0.05)
+    fake = driver._client  # noqa: SLF001
+    await driver.drive_outputs(test_pulse_ms=500)
+    # Wait for the auto-release write to fire.
+    deadline = asyncio.get_event_loop().time() + 2.0
+    while asyncio.get_event_loop().time() < deadline:
+        if (DO_COIL_BASE + DO_TEST, False) in fake.writes:
+            break
+        await asyncio.sleep(0.02)
+    # Simulate the test relay sticking on past release.
+    fake.do_bits[DO_TEST] = True
+    await asyncio.sleep(0.1)  # exceed settling window after release
+    actual = await driver.read_output_state()
+    assert driver.check_output_consistency(actual) is False
+
+
 async def test_read_failure_marks_disconnected_and_raises():
     d = IOAdamDriver(host="127.0.0.1", port=5020)
 

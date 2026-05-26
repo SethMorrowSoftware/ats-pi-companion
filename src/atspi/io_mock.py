@@ -67,6 +67,11 @@ class IOMockDriver:
             bypass_delay_active=self._bypass_delay_active,
         )
 
+    def check_output_consistency(self, actual: OutputState) -> bool:
+        # Mock writes its own state back unchanged — there is no separate
+        # read-back path, so nothing to verify. Always consistent.
+        return True
+
     async def drive_outputs(
         self,
         *,
