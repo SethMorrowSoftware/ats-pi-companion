@@ -24,6 +24,41 @@ def test_default_config_loads(tmp_path):
     assert cfg.site.unit_id == 99
 
 
+def test_config_rejects_typo_in_top_level_key(tmp_path):
+    """An ops typo at the top level used to be silently ignored. Now fails fast."""
+    from atspi.config import ConfigError
+    p = tmp_path / "cfg.yaml"
+    p.write_text("modbussserver:\n  port: 5020\n")  # double-s typo
+    with pytest.raises(ConfigError, match="modbussserver"):
+        load_config(p)
+
+
+def test_config_rejects_typo_in_nested_key(tmp_path):
+    """Nested-key typos also fail fast, with the dotted path in the message."""
+    from atspi.config import ConfigError
+    p = tmp_path / "cfg.yaml"
+    p.write_text("io:\n  drivr: mock\n")  # 'drivr' instead of 'driver'
+    with pytest.raises(ConfigError, match="io.drivr"):
+        load_config(p)
+
+
+def test_config_rejects_non_mapping_root(tmp_path):
+    from atspi.config import ConfigError
+    p = tmp_path / "cfg.yaml"
+    p.write_text("- a\n- b\n")  # YAML list, not a mapping
+    with pytest.raises(ConfigError, match="must be a mapping"):
+        load_config(p)
+
+
+def test_config_accepts_empty_file(tmp_path):
+    """An empty YAML file loads as all-defaults."""
+    p = tmp_path / "cfg.yaml"
+    p.write_text("")
+    cfg = load_config(p)
+    assert cfg.modbus_server.port == 502
+    assert cfg.io.driver == "mock"
+
+
 @pytest.mark.asyncio
 async def test_mock_driver_round_trip():
     driver = IOMockDriver()
