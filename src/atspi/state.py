@@ -136,13 +136,26 @@ class RegisterStore:
         self._lock = threading.Lock()
         self._boot_ts = time.time()
         self._state_file = state_file
-        self._transfer_timestamps: deque[float] = deque()
+        # Wallclock (UTC epoch seconds) of every transfer in the rolling
+        # 24-hour window. Wallclock rather than monotonic so the deque
+        # can survive across restarts via state_file. Eviction tolerates
+        # small NTP corrections; a large clock step could mis-age entries
+        # but won't crash anything.
+        self._transfer_timestamps: deque[int] = deque()
 
         persisted = state_file.load() if state_file else PersistedState()
+        # Reload the sliding window, evicting anything already past the
+        # 24h cutoff at startup.
+        now_wall = int(time.time())
+        cutoff = now_wall - ROLLING_WINDOW_S
+        self._transfer_timestamps.extend(
+            int(ts) for ts in persisted.recent_transfer_wallclocks if int(ts) >= cutoff
+        )
         self._snap = _StateSnapshot(
             last_transfer_to_gen_ts=persisted.last_transfer_to_gen_ts,
             last_retransfer_to_util_ts=persisted.last_retransfer_to_util_ts,
             transfer_count_lifetime=persisted.transfer_count_lifetime,
+            transfer_count_24h=len(self._transfer_timestamps),
         )
 
     # ─── Sampling-loop writers ────────────────────────────────────────
@@ -152,7 +165,6 @@ class RegisterStore:
         update counters and timestamps.
         """
         now_wall = int(time.time())
-        now_mono = time.monotonic()
         persist = False
 
         with self._lock:
@@ -171,13 +183,13 @@ class RegisterStore:
             if transferred_to_gen:
                 new_last_to_gen = now_wall
                 new_lifetime = prev.transfer_count_lifetime + 1
-                self._transfer_timestamps.append(now_mono)
+                self._transfer_timestamps.append(now_wall)
                 persist = True
             elif retransferred_to_util:
                 new_last_to_util = now_wall
                 persist = True
 
-            self._evict_old_transfers(now_mono)
+            self._evict_old_transfers(now_wall)
 
             self._snap = _StateSnapshot(
                 position=inputs.position,
@@ -337,8 +349,8 @@ class RegisterStore:
 
     # ─── Internal helpers ─────────────────────────────────────────────
 
-    def _evict_old_transfers(self, now_mono: float) -> None:
-        cutoff = now_mono - ROLLING_WINDOW_S
+    def _evict_old_transfers(self, now_wall: int) -> None:
+        cutoff = now_wall - ROLLING_WINDOW_S
         while self._transfer_timestamps and self._transfer_timestamps[0] < cutoff:
             self._transfer_timestamps.popleft()
 
@@ -351,6 +363,7 @@ class RegisterStore:
                 transfer_count_lifetime=self._snap.transfer_count_lifetime,
                 last_transfer_to_gen_ts=self._snap.last_transfer_to_gen_ts,
                 last_retransfer_to_util_ts=self._snap.last_retransfer_to_util_ts,
+                recent_transfer_wallclocks=list(self._transfer_timestamps),
             )
         try:
             self._state_file.save(persisted)
