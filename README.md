@@ -1,30 +1,31 @@
 # ATS-Pi Companion
 
 > Companion service to **[GenWatch](https://github.com/SethMorrowSoftware/GenWatch)**.
-> Implements the wire contract defined in
-> [`GenWatch/docs/integrations/ats-pi-icd.md`](https://github.com/SethMorrowSoftware/GenWatch/blob/main/docs/integrations/ats-pi-icd.md)
-> (ICD v1.0).
+> Reads an **Advantech ADAM-6060** digital-I/O module wired to an
+> **ASCO Series 300** automatic transfer switch and publishes the
+> ICD-shaped state to GenWatch over Modbus TCP. Implements
+> [`ats-pi-icd.md`](https://github.com/SethMorrowSoftware/GenWatch/blob/main/docs/integrations/ats-pi-icd.md)
+> v1.0.
 
-A dedicated Raspberry Pi service that physically observes an
-**ASCO Series 300 Power Transfer Switch** and exposes its state — plus
-a small set of safe write commands — to GenWatch over Modbus TCP. The
-ATS contacts wire into an Advantech ADAM-6060 digital-I/O module; this
-service reads the ADAM, publishes ICD-shaped registers, and applies the
-ICD's safety rules (mode-policy enforcement, 30-second comms-loss
-auto-release, stuck-relay detection).
+A dedicated Raspberry Pi service. The ADAM-6060 (6 digital inputs +
+6 relay outputs, Modbus TCP) is the electrical bridge between the
+ASCO's dry contacts and the network: its DIs sense the ATS state
+(source availability, switch position, engine-start), its relay DOs
+drive the ATS's command inputs (test, inhibit, force-transfer, bypass-
+delay). This service polls the ADAM at 10 Hz, applies the ICD's
+safety rules (mode-policy enforcement, 30-second comms-loss auto-
+release, stuck-relay detection), and serves a Modbus TCP register
+block to GenWatch.
 
 ```
-        ASCO 300 ATS                          GenWatch Pi
-   (Group 5 controller)                    (generator monitor)
-            │                                       ▲
-            │ dry contacts                          │ Modbus TCP
-            │ (18RX, 14AA/14BA,                     │ (this project
-            │  test/inhibit/transfer)               │  is the server)
-            ▼                                       │
-       ┌──────────┐                                 │
-       │ ATS-Pi   │ ── Modbus TCP (port 502) ──────▶│
-       │ (this)   │
-       └──────────┘
+┌─────────────┐   dry      ┌─────────────┐   Modbus    ┌─────────────┐   Modbus    ┌──────────┐
+│  ASCO 300   │  contacts  │  ADAM-6060  │    TCP      │   ATS-Pi    │    TCP      │ GenWatch │
+│  Series 300 │ ◀────────▶ │   6 DI +    │ ◀─────────▶ │   service   │ ◀─────────▶ │  Pi      │
+│  ATS        │  18RX,     │   6 relay   │  192.168.   │  (this proj)│  port 502   │ dashboard│
+│  Group 5    │  14AA/14BA │   DO        │  x.251      │             │             │          │
+└─────────────┘  test/     └─────────────┘             └─────────────┘             └──────────┘
+                 inhibit/
+                 transfer
 ```
 
 ## Scope
