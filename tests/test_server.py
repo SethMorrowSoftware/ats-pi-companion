@@ -3,6 +3,7 @@ through to the store, and dispatches command intents.
 """
 from __future__ import annotations
 
+from atspi.io_driver import InputSnapshot
 from atspi.server import _make_data_block
 from atspi.state import (
     ADDR_CMD_INHIBIT,
@@ -11,6 +12,18 @@ from atspi.state import (
     CommandIntent,
     RegisterStore,
 )
+
+
+def _store_in_auto() -> RegisterStore:
+    """RegisterStore seeded with one AUTO-mode sampling cycle, so command
+    writes are accepted (write_register rejects in "unknown" mode).
+    """
+    store = RegisterStore()
+    store.apply_input_snapshot(InputSnapshot(
+        position="utility", normal_available=True, emergency_available=True,
+        engine_start_calling=False, ats_mode="auto", fault_bits=0,
+    ))
+    return store
 
 
 def test_get_values_reads_through_to_store():
@@ -30,7 +43,7 @@ def test_get_values_fires_on_read_callback():
 
 
 def test_set_values_dispatches_command_intent_for_recognized_writes():
-    store = RegisterStore()
+    store = _store_in_auto()
     intents: list[CommandIntent] = []
     block = _make_data_block(store, on_read=None, on_command=intents.append)
     block.setValues(ADDR_CMD_INHIBIT + 1, [1])
@@ -38,7 +51,7 @@ def test_set_values_dispatches_command_intent_for_recognized_writes():
 
 
 def test_set_values_does_not_dispatch_unrecognized_writes():
-    store = RegisterStore()
+    store = _store_in_auto()
     intents: list[CommandIntent] = []
     block = _make_data_block(store, on_read=None, on_command=intents.append)
     block.setValues(1, [0])  # writing to ADDR_POSITION isn't a command
@@ -47,7 +60,7 @@ def test_set_values_does_not_dispatch_unrecognized_writes():
 
 def test_set_values_multiple_addresses():
     """Writing multiple registers in one PDU dispatches each recognized one."""
-    store = RegisterStore()
+    store = _store_in_auto()
     intents: list[CommandIntent] = []
     block = _make_data_block(store, on_read=None, on_command=intents.append)
     # ADDR_CMD_TEST=0x0100, ADDR_CMD_INHIBIT=0x0101

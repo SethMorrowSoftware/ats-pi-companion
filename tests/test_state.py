@@ -92,8 +92,17 @@ def test_24h_count_evicts_old_entries(monkeypatch):
     assert store.read_register(ADDR_TRANSFER_COUNT_LIFETIME + 1) == 2
 
 
-def test_write_register_returns_command_intent():
+def _store_in_auto() -> RegisterStore:
+    """Helper: a RegisterStore that has seen one sampling cycle in AUTO,
+    matching the realistic flow before any client write would arrive.
+    """
     store = RegisterStore()
+    store.apply_input_snapshot(_inputs(position="utility"))
+    return store
+
+
+def test_write_register_returns_command_intent():
+    store = _store_in_auto()
     assert store.write_register(ADDR_CMD_TEST, 1) == CommandIntent(test_pulse_ms=750)
     assert store.write_register(ADDR_CMD_INHIBIT, 1) == CommandIntent(inhibit=True)
     assert store.write_register(ADDR_CMD_INHIBIT, 0) == CommandIntent(inhibit=False)
@@ -102,7 +111,7 @@ def test_write_register_returns_command_intent():
 
 
 def test_write_register_rejects_unknown_addresses_and_values():
-    store = RegisterStore()
+    store = _store_in_auto()
     assert store.write_register(0x0FFF, 1) is None  # unknown address
     assert store.write_register(ADDR_CMD_TEST, 0) is None  # ICD: 1 to trigger
     assert store.write_register(ADDR_CMD_INHIBIT, 99) is None  # out-of-range
@@ -110,7 +119,7 @@ def test_write_register_rejects_unknown_addresses_and_values():
 
 def test_write_register_does_not_mutate_readback():
     """Read-back state must reflect physical state, not the write."""
-    store = RegisterStore()
+    store = _store_in_auto()
     intent = store.write_register(ADDR_CMD_INHIBIT, 1)
     assert intent is not None
     # No mutation yet — read-back stays 0 until the sampling loop sees
@@ -198,3 +207,109 @@ def test_persistence_save_failure_does_not_crash(tmp_path):
 def test_reserved_addresses_read_zero(addr):
     store = RegisterStore()
     assert store.read_register(addr) == 0
+
+
+# ─── Mode enforcement (ICD §6) ───────────────────────────────────────────
+
+
+def _seed_mode(store: RegisterStore, mode: str) -> None:
+    store.apply_input_snapshot(_inputs(position="utility", ats_mode=mode))
+
+
+@pytest.mark.parametrize(
+    "addr,value",
+    [
+        (ADDR_CMD_TEST, 1),
+        (ADDR_CMD_INHIBIT, 1),
+        (ADDR_CMD_INHIBIT, 0),
+        (ADDR_CMD_FORCE_TRANSFER, 1),
+        (ADDR_CMD_FORCE_TRANSFER, 0),
+        (ADDR_CMD_BYPASS_DELAY, 1),
+    ],
+)
+def test_all_commands_accepted_in_auto_mode(addr, value):
+    store = RegisterStore()
+    _seed_mode(store, "auto")
+    assert store.write_register(addr, value) is not None
+
+
+@pytest.mark.parametrize("value", [0, 1])
+def test_inhibit_accepted_in_manual_mode(value):
+    store = RegisterStore()
+    _seed_mode(store, "manual")
+    assert store.write_register(ADDR_CMD_INHIBIT, value) is not None
+
+
+@pytest.mark.parametrize(
+    "addr",
+    [ADDR_CMD_TEST, ADDR_CMD_FORCE_TRANSFER, ADDR_CMD_BYPASS_DELAY],
+)
+def test_auto_only_commands_rejected_in_manual_mode(addr):
+    store = RegisterStore()
+    _seed_mode(store, "manual")
+    assert store.write_register(addr, 1) is None
+
+
+@pytest.mark.parametrize(
+    "addr",
+    [ADDR_CMD_TEST, ADDR_CMD_INHIBIT, ADDR_CMD_FORCE_TRANSFER, ADDR_CMD_BYPASS_DELAY],
+)
+def test_all_commands_rejected_in_test_or_unknown_mode(addr):
+    for mode in ("test", "unknown"):
+        store = RegisterStore()
+        _seed_mode(store, mode)
+        assert store.write_register(addr, 1) is None, (
+            f"{addr:#06x} in mode={mode!r} should be rejected"
+        )
+
+
+def test_mode_reject_latches_fault_input_in_summary():
+    """A mode-rejected write must set FAULT_INPUT in fault_summary, and
+    the bit stays set until the next valid command clears it.
+    """
+    store = RegisterStore()
+    _seed_mode(store, "manual")
+    # cmd_test is auto-only — rejected in manual.
+    assert store.write_register(ADDR_CMD_TEST, 1) is None
+    assert store.read_register(ADDR_FAULT_SUMMARY) & FAULT_INPUT, (
+        "Mode-rejected write must surface as FAULT_INPUT"
+    )
+
+    # Switching to auto alone must NOT clear the latch — the ICD says
+    # "until next valid command clears it".
+    _seed_mode(store, "auto")
+    assert store.read_register(ADDR_FAULT_SUMMARY) & FAULT_INPUT
+
+    # A valid command clears the latch.
+    assert store.write_register(ADDR_CMD_INHIBIT, 1) is not None
+    assert not (store.read_register(ADDR_FAULT_SUMMARY) & FAULT_INPUT)
+
+
+def test_mode_reject_does_not_dispatch_command():
+    """A mode-rejected write must NOT return a CommandIntent — the I/O
+    driver must never see the physical command.
+    """
+    store = RegisterStore()
+    _seed_mode(store, "manual")
+    assert store.write_register(ADDR_CMD_FORCE_TRANSFER, 1) is None
+
+
+def test_invalid_value_does_not_set_mode_reject_latch():
+    """Value-invalid writes are a separate failure mode from
+    mode-restricted writes — they must not latch FAULT_INPUT.
+    """
+    store = RegisterStore()
+    _seed_mode(store, "auto")
+    assert store.write_register(ADDR_CMD_INHIBIT, 99) is None
+    assert not (store.read_register(ADDR_FAULT_SUMMARY) & FAULT_INPUT)
+
+
+def test_default_unknown_mode_rejects_writes_until_first_sample():
+    """Before the first sampling cycle, ats_mode is 'unknown'. All command
+    writes are conservatively rejected — we shouldn't drive relays based
+    on a mode we haven't read yet.
+    """
+    store = RegisterStore()
+    # No apply_input_snapshot yet — mode is "unknown".
+    assert store.write_register(ADDR_CMD_INHIBIT, 1) is None
+    assert store.write_register(ADDR_CMD_TEST, 1) is None
