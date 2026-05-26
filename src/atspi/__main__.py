@@ -60,6 +60,13 @@ async def _sampling_loop(driver: IODriver, store: RegisterStore) -> None:
             store.apply_input_snapshot(inputs)
             store.apply_output_state(outputs)
             store.set_input_fault(False)
+            # Stuck-relay detection: compare actual driver state against
+            # the last commanded state. The driver enforces its own
+            # settling window so a write that hasn't physically actuated
+            # yet isn't flagged. OUTPUT_FAULT stays set until cleared by
+            # the next successful drive_outputs() in _dispatch_command.
+            if not driver.check_output_consistency(outputs):
+                store.set_output_fault(True)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
