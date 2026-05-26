@@ -159,7 +159,11 @@ class RegisterStore:
             self._fw_version = self._fw_version + (0,) * (3 - len(self._fw_version))
         self._icd_version = ICD_VERSION
         self._lock = threading.Lock()
-        self._boot_ts = time.time()
+        # Monotonic boot timestamp. Wall-clock would break ICD §6.2's
+        # "uptime is strictly increasing within a boot" guarantee on the
+        # first NTP correction backward — GenWatch interprets a backward
+        # jump as an undetected reboot.
+        self._boot_mono = time.monotonic()
         self._state_file = state_file
         # Wallclock (UTC epoch seconds) of every transfer in the rolling
         # 24-hour window. Wallclock rather than monotonic so the deque
@@ -291,8 +295,29 @@ class RegisterStore:
 
     # ─── Modbus server-side ───────────────────────────────────────────
 
-    def read_register(self, addr: int) -> int:
-        """Return the 16-bit value at the given PDU address."""
+    def read_register(
+        self,
+        addr: int,
+        *,
+        now_mono: float | None = None,
+        now_wall: int | None = None,
+    ) -> int:
+        """Return the 16-bit value at the given PDU address.
+
+        ``now_mono`` and ``now_wall`` let a caller pin the time values
+        used for derived registers (``uptime_s``, ``wallclock``) across
+        a multi-word read. Without that, a two-word u32 read
+        independently reads ``time.*`` twice — if the second call
+        straddles a second boundary the high/low pair is inconsistent
+        and GenWatch reconstructs a wrong value. The Modbus data block
+        threads a single timestamp through every register in one
+        ``getValues`` call; direct callers (tests, the health endpoint)
+        can omit and accept a small race on the u32 registers.
+        """
+        if now_mono is None:
+            now_mono = time.monotonic()
+        if now_wall is None:
+            now_wall = int(time.time())
         with self._lock:
             s = self._snap
 
@@ -326,16 +351,15 @@ class RegisterStore:
             if addr == ADDR_LAST_RETRANSFER_TS + 1:
                 return s.last_retransfer_to_util_ts & 0xFFFF
             if addr == ADDR_UPTIME_S:
-                up = int(time.time() - self._boot_ts)
+                up = int(now_mono - self._boot_mono)
                 return (up >> 16) & 0xFFFF
             if addr == ADDR_UPTIME_S + 1:
-                up = int(time.time() - self._boot_ts)
+                up = int(now_mono - self._boot_mono)
                 return up & 0xFFFF
             if addr == ADDR_WALLCLOCK:
-                wc = int(time.time())
-                return (wc >> 16) & 0xFFFF
+                return (now_wall >> 16) & 0xFFFF
             if addr == ADDR_WALLCLOCK + 1:
-                return int(time.time()) & 0xFFFF
+                return now_wall & 0xFFFF
             if addr == ADDR_TRANSFER_COUNT_LIFETIME:
                 return (s.transfer_count_lifetime >> 16) & 0xFFFF
             if addr == ADDR_TRANSFER_COUNT_LIFETIME + 1:

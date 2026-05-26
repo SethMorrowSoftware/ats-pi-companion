@@ -134,7 +134,17 @@ def _make_data_block(
             # pymodbus passes 1-based addresses
             if on_read is not None:
                 on_read()
-            return [store.read_register(address - 1 + i) for i in range(count)]
+            # Pin time once for the whole multi-word read so u32 fields
+            # (uptime_s at 0x0014, wallclock at 0x0016) return a coherent
+            # high/low pair even if this call straddles a second boundary.
+            now_mono = time.monotonic()
+            now_wall = int(time.time())
+            return [
+                store.read_register(
+                    address - 1 + i, now_mono=now_mono, now_wall=now_wall,
+                )
+                for i in range(count)
+            ]
 
         def setValues(self, address, values):  # noqa: N802
             for i, v in enumerate(values):

@@ -258,9 +258,17 @@ site:
 persistence:
   state_file: /var/lib/atspi/state.json
 
-logging:
-  level: INFO
+# Optional: localhost JSON health endpoint. Off by default.
+# health:
+#   enabled: true
+#   host: 127.0.0.1
+#   port: 8001
 ```
+
+Log level is set via the CLI (`atspi --log-level DEBUG`), not the
+config file — production deployments rely on systemd-journal capture
+and `journalctl -u atspi -p info`. The strict config loader rejects
+unknown keys, so adding `logging:` to the YAML will fail-fast.
 
 Validate at startup; fail fast on missing required fields.
 
