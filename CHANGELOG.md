@@ -9,6 +9,57 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 ## [Unreleased]
 
+### Added (ICD contract conformance pass)
+
+- `tests/test_icd_contract.py`: 44 end-to-end tests against a real
+  pymodbus client. Asserts register layout, u32 word order, boolean /
+  enum / bitfield encoding, mode-policy enforcement on the wire, the
+  ICD §10 golden transfer-and-retransfer sequence, write-reply latency
+  (< 100 ms), and atomicity of multi-word reads under concurrent state
+  updates. Catches contract drift on the ATS-Pi side; the
+  complementary "GenWatch consumer matches the ICD" test must live in
+  the GenWatch repo.
+- `RegisterStore.can_write(addr)`: pre-validates a holding-register
+  write for the Modbus `validate()` hook. Returns False (and latches
+  `mode_reject_active`) on mode-policy violation, so the rejection
+  surfaces as a Modbus exception response rather than silent success.
+
+### Fixed (ICD compliance)
+
+- Mode-policy violations now return a Modbus exception to the client
+  rather than silently succeeding. Mode enforcement moved from
+  `RegisterStore.write_register` to `_GuardedSlaveContext.validate`,
+  which is the only pymodbus 3.7 hook that can emit an exception
+  response.
+- Reads of reserved addresses through `0xFFFF` now return `0x0000`
+  per ICD §3. Previously addresses past the data block's allocated
+  `0x0200` size returned exception 0x02 (IllegalAddress). The
+  `validate()` override now accepts any read address; `getValues`
+  delegates to `RegisterStore.read_register`, which already returns
+  0 for unknown addresses.
+- `fault_summary` (`0x0005`) reads are masked to `0x000F`: ICD §1.1.1
+  says bits 4-15 are RESERVED and MUST be 0 on the wire. A buggy
+  driver reporting stray bits in `InputSnapshot.fault_bits` can no
+  longer leak them to GenWatch.
+
+### Known ICD deviations (documented, not yet fixed)
+
+- Reserved-range write rejection returns Modbus exception 0x02
+  (illegal data address) instead of the ICD-preferred 0x03 (illegal
+  data value).
+- Mode-policy rejection returns Modbus exception 0x02 instead of the
+  ICD-preferred 0x04 (server device failure).
+
+Both are pymodbus 3.7 limitations — `validate()` is the only hook that
+can emit a Modbus exception response and it can only emit 0x02. The
+safety property the ICD actually cares about (write rejected with a
+Modbus exception, GenWatch knows it didn't take effect) holds in both
+cases. Both client-side workarounds — treat any exception as
+rejection, optionally consult `fault_summary` for the distinction —
+are trivial. Reaching exact code compliance requires either porting to
+a newer pymodbus minor (which has its own datastore-API rewrite cost)
+or a custom request handler.
+
 ### Fixed (trunk regression sweep)
 
 - `__main__._amain` lost the call to `_wait_for_shutdown_or_failure` in
