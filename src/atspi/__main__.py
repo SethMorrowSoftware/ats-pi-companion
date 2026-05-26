@@ -156,7 +156,12 @@ async def _amain(args: argparse.Namespace) -> int:
     notify_ready()
     log.info("atspi is running — Ctrl-C to stop")
 
-    log.info("atspi shutting down")
+    reason = await _wait_for_shutdown_or_failure(stop, critical_tasks)
+    if reason == "shutdown":
+        log.info("atspi shutting down")
+    else:
+        log.error("atspi shutting down due to failure of critical task: %s", reason)
+
     if health_server is not None:
         health_server.stop()
     tasks = (sample_task, watchdog_task, notify_task, server_task)

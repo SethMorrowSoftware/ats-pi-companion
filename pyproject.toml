@@ -24,10 +24,11 @@ classifiers = [
 ]
 
 dependencies = [
-    # ~= pins to 3.7.x patch range; 3.7.4 is what we test against. Bumping
-    # to a new pymodbus minor needs explicit testing because their API has
-    # broken between minors historically.
-    "pymodbus>=3.7.4,<3.14.0",
+    # 3.7.x patch range; 3.7.4 is what we test against. pymodbus 3.13
+    # renamed ModbusSlaveContext → ModbusDeviceContext and restructured
+    # the datastore API in a way that breaks our server module; do not
+    # widen the upper bound without porting server.py to the new API.
+    "pymodbus>=3.7.4,<3.8",
     "PyYAML>=6.0",
 ]
 

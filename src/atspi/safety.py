@@ -48,6 +48,15 @@ class SafetyWatchdog:
             log.info("comms recovered; watchdog re-armed")
             self._released = False
 
+    def snapshot(self) -> tuple[float, bool]:
+        """Return ``(seconds_since_last_modbus_read, released)``.
+
+        Stable shape for callers (health endpoint, future metrics)
+        that want to observe watchdog state without poking at private
+        attributes.
+        """
+        return time.monotonic() - self._last_read_monotonic, self._released
+
     async def run(self) -> None:
         log.info(
             "safety watchdog running (timeout=%.1fs, check every %.1fs)",
@@ -67,7 +76,12 @@ class SafetyWatchdog:
                 )
                 # Release in the store (so read-back registers reflect
                 # the release immediately) AND drive the physical
-                # release through the I/O layer.
+                # release through the I/O layer. Latch _released ONLY
+                # when the physical write succeeded — otherwise an ADAM
+                # blip during a comms-loss event would leave inhibit /
+                # force-transfer asserted on the hardware until comms
+                # came back. Re-tries every CHECK_INTERVAL_S until the
+                # write lands.
                 self._store.release_maintained_commands()
                 try:
                     await self._driver.drive_outputs(
@@ -75,5 +89,10 @@ class SafetyWatchdog:
                         force_transfer=False,
                     )
                 except Exception as e:  # noqa: BLE001
-                    log.exception("safety watchdog: drive_outputs failed: %s", e)
+                    log.exception(
+                        "safety watchdog: drive_outputs failed (%s); "
+                        "will retry next tick",
+                        e,
+                    )
+                    continue
                 self._released = True

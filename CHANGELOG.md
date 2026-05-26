@@ -9,8 +9,40 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 ## [Unreleased]
 
+### Fixed (trunk regression sweep)
+
+- `__main__._amain` lost the call to `_wait_for_shutdown_or_failure` in
+  a merge; the service printed "running" then immediately "shutting
+  down" and NameError'd on an undefined `reason` variable. Restored the
+  call so SIGTERM and critical-task death both drive a clean exit.
+- `pyproject.toml` pinned back to `pymodbus>=3.7.4,<3.8`. The previous
+  `<3.14.0` ceiling let pymodbus 3.13 install, which renamed
+  `ModbusSlaveContext`→`ModbusDeviceContext` and broke `server.py`'s
+  imports. Bumping past 3.7.x now requires porting the datastore code
+  first.
+- `tests/test_server.py` lost `import pytest`, `import asyncio`,
+  `_GuardedSlaveContext`, and `start_server` in a merge conflict
+  resolution — the file no longer collected. Restored.
+- `tests/test_state.py` had a duplicate `test_write_register_returns_command_intent`
+  and three tests calling an undefined `_store_in_auto`. Replaced the
+  stub with the real helper.
+- `SafetyWatchdog.run` now latches `_released=True` only when the
+  physical release write succeeds. Previously a transient driver
+  failure during a comms-loss event would leave inhibit / force-
+  transfer asserted on the ADAM until comms recovered. Retries every
+  `CHECK_INTERVAL_S` until the write lands.
+- `IOAdamDriver._pulse` had a dead branch that recomputed `slot` and
+  attempted to cancel a prior release task on a code path that could
+  only run when no prior task existed. Removed.
+
 ### Added
 
+- `SafetyWatchdog.snapshot()` returns `(last_read_age_s, released)` as
+  a stable shape for the health endpoint and future metrics consumers
+  (replaces poking at private attributes).
+- CI `soak` job: starts atspi against the mock driver, performs a real
+  Modbus read with pymodbus, sends SIGTERM, and asserts exit 0. Would
+  have caught the `_wait_for_shutdown_or_failure` regression.
 - Strict config loader: unknown keys now raise `ConfigError` with the
   dotted path of the offending key, instead of silently using defaults.
 - `_GuardedSlaveContext` rejects writes to any address outside the four
