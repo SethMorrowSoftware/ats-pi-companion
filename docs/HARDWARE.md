@@ -105,7 +105,26 @@ From the Pi:
 ```bash
 # Confirm the ADAM is reachable
 ping -c 3 192.168.1.251
+```
 
+The `atspi-bench` command walks through every DI and DO interactively —
+prompts you to actuate each contact, reads the ADAM, confirms the
+correct bit changed, then drives each DO in turn and asks you to
+confirm the matching ASCO terminal responded:
+
+```bash
+atspi-bench --host 192.168.1.251 --port 502 --unit-id 1
+# add --skip-dos when the ATS is energised and a load flip is unsafe
+# add --json to capture the per-step results to a file:
+#   atspi-bench --host 192.168.1.251 --json > bench-results.json
+```
+
+Exit codes: 0 = all checks passed, 1 = at least one failed, 2 = ADAM
+unreachable, 3 = skipped at least one check (incomplete).
+
+For ad-hoc spot checks without the interactive flow:
+
+```bash
 # Read all six DIs as a packed register
 modpoll -m tcp -a 1 -r 1 -c 1 192.168.1.251
 ```

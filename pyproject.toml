@@ -37,6 +37,7 @@ dev = [
 
 [project.scripts]
 atspi = "atspi.__main__:main"
+atspi-bench = "atspi.bench:main"
 
 [project.urls]
 "Homepage" = "https://github.com/SethMorrowSoftware/ats-pi-companion"
