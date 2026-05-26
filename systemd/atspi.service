@@ -13,8 +13,11 @@ NotifyAccess=main
 WatchdogSec=60
 TimeoutStartSec=30
 
-# Requires the 'atspi' system user to exist. Create once at install time:
+# Requires the 'atspi' system user to exist. Create BEFORE the first
+# `systemctl start atspi` — otherwise the unit fails with
+# "User/Group resolution: 'atspi' not found" (visible only in journal):
 #   sudo useradd --system --no-create-home --shell /usr/sbin/nologin atspi
+# See docs/HARDWARE.md §7 for the full commissioning sequence.
 User=atspi
 Group=atspi
 

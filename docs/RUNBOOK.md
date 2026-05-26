@@ -31,6 +31,10 @@ modpoll -m tcp -a 1 -r 1 -c 6 <ats-pi>
 modpoll -m tcp -a 1 -r 6 -c 1 <ats-pi>     # PDU 0x0005 = fault_summary
 ```
 
+> `modpoll` isn't in Raspbian's default package set. Install once with
+> `sudo apt install modbus-cli`, or grab the static binary from
+> proconx.com. Same package on the GenWatch Pi.
+
 `fault_summary` bits decoded:
 
 | Bit | Mask | Meaning | What to check |
@@ -119,6 +123,19 @@ ADAM read_coils(0, 6) error: ...
 
 → Same diagnosis flow as §2 step 3. The bit clears the next time the
 sampling loop reads successfully.
+
+**Is it a transient network blip or a real wiring fault?**
+The driver uses a 500 ms Modbus timeout (1 retry). A single failed
+read at the boundary of "slow ADAM" vs "no ADAM" is normal and
+self-recovers in 100 ms. Worry only if:
+
+- The error message repeats every cycle for >5 s — likely cable,
+  switch, or ADAM power
+- `ping <adam-ip>` from the Pi fails — definitely network/cable
+- `ping` works but every Modbus read times out — ADAM is locked up,
+  power-cycle it
+- Errors started AFTER weeks of stability — suspect the cable or
+  switch port first (corrosion, bent pin) before suspecting the ADAM
 
 ### (b) A Modbus write was rejected by mode policy
 

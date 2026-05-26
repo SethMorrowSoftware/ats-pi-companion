@@ -84,6 +84,16 @@ TRANSFERRING_HOLD_S = 2.0
 # read/write round-trip plus the relay's own actuation delay.
 OUTPUT_SETTLING_S = 0.5
 
+# Per-operation Modbus timeout. The ADAM-6060 typically responds within
+# ~50 ms on a healthy LAN; 500 ms gives an order of magnitude of slack.
+# pymodbus's default of 3 s × 3 retries = 9 s would stall the 10 Hz
+# sampling loop badly enough that GenWatch's 1.5 s prime poll sees
+# repeated stale snapshots — and on a flaky drop the operator just sees
+# the service appearing wedged. With these values, a hard failure is
+# detected within ~1 s and the next sampling cycle retries.
+ADAM_TIMEOUT_S = 0.5
+ADAM_RETRIES = 1
+
 
 def _bit_pulse(timestamp_mono: float | None, hold_s: float, now_mono: float) -> bool:
     if timestamp_mono is None:
@@ -122,7 +132,10 @@ class IOAdamDriver:
 
     async def connect(self) -> bool:
         if self._client is None:
-            self._client = AsyncModbusTcpClient(host=self.host, port=self.port)
+            self._client = AsyncModbusTcpClient(
+                host=self.host, port=self.port,
+                timeout=ADAM_TIMEOUT_S, retries=ADAM_RETRIES,
+            )
         try:
             ok = await self._client.connect()
         except Exception as e:  # noqa: BLE001
