@@ -67,6 +67,7 @@ docs/
   SPEC.md           — implementation specification (companion to the ICD)
   HARDWARE.md       — BOM, wiring, install
   DEVELOPMENT.md    — getting started, running tests, manual testing
+  RUNBOOK.md        — field troubleshooting (read this at 2am)
 
 tests/
   test_smoke.py     — imports, basic config load
