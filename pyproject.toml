@@ -28,7 +28,7 @@ dependencies = [
     # renamed ModbusSlaveContext → ModbusDeviceContext and restructured
     # the datastore API in a way that breaks our server module; do not
     # widen the upper bound without porting server.py to the new API.
-    "pymodbus>=3.7.4,<3.8",
+    "pymodbus>=3.7.4,<3.14",
     "PyYAML>=6.0",
 ]
 
