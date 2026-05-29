@@ -9,6 +9,40 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 ## [Unreleased]
 
+### Fixed (pre-hardware reliability sweep)
+
+- `IOAdamDriver` no longer strands a pulsed relay (Test, Bypass) asserted
+  when the release write fails. Previously, if a network/ADAM blip landed
+  on the exact instant a pulse was released, the release write raised, the
+  fire-and-forget release task died unretrieved, and nothing retried — the
+  relay stayed energised. For the Test output that means continuously
+  commanding the ATS to test-transfer to the generator; for Bypass it
+  defeats every transfer time delay. Worse, stuck-relay detection could not
+  see it: the driver still believed it had commanded the relay ON, so
+  commanded==actual==True and no `OUTPUT_FAULT` was raised. The release now
+  (a) records the intended OFF state at pulse expiry — so an overstaying
+  relay surfaces as `OUTPUT_FAULT` past the settling window — and (b) retries
+  the release write until it lands, mirroring the safety watchdog's
+  "retry until the write lands" posture for maintained commands.
+- `RegisterStore.apply_input_snapshot` now gates transfer counting on a
+  plausible predecessor position instead of "any position that isn't the
+  destination". Two production-only bugs the unit suite's direct
+  utility↔generator transitions never exercised:
+  - **Lifetime count drifted up on reboot.** Boot position defaults to
+    `unknown`, so a first read landing on `generator` (a restart during a
+    utility outage) counted as a fresh transfer — `transfer_count_lifetime`
+    would climb by one on every reboot while the ATS sat on the generator.
+    A momentary both-aux-open glitch (reads as `unknown`) bouncing back to
+    the same rail double-counted the same way. Transfer-to-gen now counts
+    only from `utility`/`transferring`; retransfer-to-util only from
+    `generator`/`transferring`.
+  - **`last_retransfer_to_util_ts` was never stamped on real hardware.** The
+    retransfer stamp required the position seen immediately before `utility`
+    to be exactly `generator`, but the Load Disconnect pulse holds the
+    position at `transferring` for ~2 s through the stroke — so the real
+    `generator → transferring → utility` path left the timestamp at 0
+    forever. Including `transferring` as a valid predecessor fixes it.
+
 ### Fixed (commissioning-day robustness)
 
 - `IOAdamDriver` now passes `timeout=0.5` and `retries=1` to

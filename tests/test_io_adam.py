@@ -310,3 +310,71 @@ async def test_read_failure_marks_disconnected_and_raises():
     with pytest.raises(IOError):
         await d.read_inputs()
     assert d._connected is False  # noqa: SLF001
+
+
+# ─── Pulse-release robustness (stranded-relay prevention) ────────────────────
+
+
+class _ReleaseFailClient(FakeClient):
+    """FakeClient whose release writes (value=False) fail a configurable
+    number of times before succeeding. Simulates an ADAM/network blip landing
+    on the exact instant a pulsed relay is being released.
+    """
+
+    def __init__(self, fail_releases: int):
+        super().__init__()
+        self._fail_releases = fail_releases
+
+    async def write_coil(self, address, value, slave):
+        if value is False and self._fail_releases > 0:
+            self._fail_releases -= 1
+            raise OSError("simulated ADAM blip on release write")
+        return await super().write_coil(address, value, slave)
+
+
+async def test_pulse_release_retries_until_it_lands(driver, monkeypatch):
+    """A transiently-failing release write MUST be retried until it lands — a
+    momentary relay (Test, Bypass) can never be left stranded ON. Leaving the
+    Test relay asserted would continuously command the ATS to test-transfer.
+    """
+    import atspi.io_adam as io_adam_mod
+    monkeypatch.setattr(io_adam_mod, "PULSE_RELEASE_RETRY_S", 0.02)
+    # Three release writes fail, the fourth succeeds.
+    driver._client = _ReleaseFailClient(fail_releases=3)  # noqa: SLF001
+    driver._connected = True  # noqa: SLF001
+    # Isolate the retry logic from the real-socket reconnect path that a
+    # failed write would otherwise trigger (that path is covered separately).
+    async def _noop():
+        return
+    monkeypatch.setattr(driver, "_ensure_connected", _noop)
+
+    await driver.drive_outputs(test_pulse_ms=500)
+    assert driver._client.do_bits[DO_TEST] is True  # noqa: SLF001  (asserted)
+    # The pulse window elapses, the first releases fail, then one lands.
+    await _wait_for(lambda: driver._client.do_bits[DO_TEST] is False, timeout=3.0)  # noqa: SLF001
+
+
+async def test_stranded_pulse_relay_surfaces_as_output_fault(driver, monkeypatch):
+    """If the release write keeps failing the relay stays ON — but the driver
+    MUST record the intended OFF state at pulse expiry so stuck-relay detection
+    raises a fault (commanded=False vs actual=True past the settling window)
+    instead of silently masking the stranded relay (commanded==actual==True).
+    """
+    import atspi.io_adam as io_adam_mod
+    monkeypatch.setattr(io_adam_mod, "OUTPUT_SETTLING_S", 0.05)
+    monkeypatch.setattr(io_adam_mod, "PULSE_RELEASE_RETRY_S", 0.02)
+    driver._client = _ReleaseFailClient(fail_releases=10_000)  # noqa: SLF001  (never lands)
+    driver._connected = True  # noqa: SLF001
+    async def _noop():
+        return
+    monkeypatch.setattr(driver, "_ensure_connected", _noop)
+
+    await driver.drive_outputs(test_pulse_ms=500)
+    # Past the pulse window (500 ms) + the settling window (50 ms).
+    await asyncio.sleep(0.7)
+    actual = await driver.read_output_state()
+    assert actual.test_active is True, "release writes failing → relay stuck on"
+    assert driver.check_output_consistency(actual) is False, (
+        "a pulse stranded ON past its window must raise a stuck-relay fault, "
+        "not be silently masked by stale commanded state"
+    )

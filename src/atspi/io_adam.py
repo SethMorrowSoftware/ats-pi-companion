@@ -94,6 +94,15 @@ OUTPUT_SETTLING_S = 0.5
 ADAM_TIMEOUT_S = 0.5
 ADAM_RETRIES = 1
 
+# A pulsed relay (test, bypass) MUST drop when its window elapses. If the
+# release write fails — a network/ADAM blip landing on the exact instant of
+# release — retry at this cadence until it lands rather than abandoning the
+# relay asserted. Leaving the Test relay stuck on would continuously command
+# the ATS to test-transfer to the generator; leaving Bypass stuck on would
+# defeat every transfer time delay. Mirrors the safety watchdog's
+# "retry until the write lands" posture for maintained commands.
+PULSE_RELEASE_RETRY_S = 0.25
+
 
 def _bit_pulse(timestamp_mono: float | None, hold_s: float, now_mono: float) -> bool:
     if timestamp_mono is None:
@@ -271,11 +280,41 @@ class IOAdamDriver:
     async def _release(self, coil: int, do_index: int, name: str, after_ms: int) -> None:
         try:
             await asyncio.sleep(after_ms / 1000.0)
-            await self._write_coil(coil, False)
-            self._record_commanded(do_index, False)
-            log.info("ADAM: pulsed %s released", name)
         except asyncio.CancelledError:
-            pass
+            return
+        # The pulse window has elapsed: the intended state is now OFF. Record
+        # that up front — before the write — so stuck-relay detection flags an
+        # overstaying relay (commanded=False vs actual=True past the settling
+        # window) even while the release write below is still being retried.
+        # Without this, a relay stranded ON by a failed release would read
+        # back as commanded==actual==True and never raise OUTPUT_FAULT.
+        self._record_commanded(do_index, False)
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                await self._write_coil(coil, False)
+            except asyncio.CancelledError:
+                return
+            except OSError as e:
+                # First failure is notable; subsequent retries are expected
+                # noise during an ADAM/network outage (the sampling loop is
+                # already logging the same outage), so keep them at DEBUG.
+                log.log(
+                    logging.WARNING if attempt == 1 else logging.DEBUG,
+                    "ADAM: release of pulsed %s failed (attempt %d): %s; retrying",
+                    name, attempt, e,
+                )
+                try:
+                    await asyncio.sleep(PULSE_RELEASE_RETRY_S)
+                except asyncio.CancelledError:
+                    return
+                continue
+            if attempt == 1:
+                log.info("ADAM: pulsed %s released", name)
+            else:
+                log.warning("ADAM: pulsed %s released after %d attempts", name, attempt)
+            return
 
     # ─── Internal: Modbus access with implicit reconnect ─────────────
 
