@@ -7,6 +7,17 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
+    ignore:
+      # pymodbus 3.8+ renamed ModbusSlaveContext → ModbusDeviceContext and
+      # restructured the datastore API, which breaks server.py (it subclasses
+      # ModbusSlaveContext). Hold on the 3.7.x line — pinned <3.8 in
+      # pyproject.toml — until server.py is ported to the new datastore API.
+      # Patch updates within 3.7.x (e.g. a security fix) are still allowed.
+      # Without this, Dependabot regenerates the constraint-widening PR weekly.
+      - dependency-name: "pymodbus"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
 
   - package-ecosystem: "github-actions"
     directory: "/"
