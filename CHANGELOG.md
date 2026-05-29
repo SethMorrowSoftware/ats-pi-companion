@@ -41,6 +41,13 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
   It was regenerating a weekly PR to widen the pin to `<3.14`, which would let
   pymodbus 3.13 install and break `server.py` (the `ModbusSlaveContext` →
   `ModbusDeviceContext` rename). 3.7.x patch updates are still allowed.
+- The CI `audit` job now scans only the project's own dependency closure
+  (`pymodbus`, `PyYAML` + transitives, read from `pyproject.toml`) instead of
+  the whole environment. It was permanently red — `--strict` failed on the
+  un-publishable editable `atspi` package and on CVEs in the CI runner's base
+  tooling (pip/setuptools/wheel), none of which ship to the Pi. Now it's green
+  in the clean case, so a red result is a real, actionable advisory in a
+  dependency the service actually ships.
 
 ### Fixed (pre-hardware reliability sweep)
 
