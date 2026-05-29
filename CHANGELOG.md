@@ -37,6 +37,10 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
   other logs). It logs the first failure of a streak at WARNING, throttles
   repeats to one reminder every ~30 s, and logs `sampling recovered …` when
   reads succeed again. RUNBOOK §3(a) and HARDWARE §7 updated to match.
+- Dependabot now ignores pymodbus minor/major bumps (`.github/dependabot.yml`).
+  It was regenerating a weekly PR to widen the pin to `<3.14`, which would let
+  pymodbus 3.13 install and break `server.py` (the `ModbusSlaveContext` →
+  `ModbusDeviceContext` rename). 3.7.x patch updates are still allowed.
 
 ### Fixed (pre-hardware reliability sweep)
 
