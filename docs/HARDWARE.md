@@ -145,6 +145,21 @@ Once §5 (install sequence) and §6 (verify reads) are done, follow this
 checklist in order. Each step has an "if this fails" pointer so an
 operator can self-rescue without paging an SRE.
 
+**The quick path** — two scripts in the repo root automate most of this:
+
+```bash
+sudo ./install.sh     # service user + venv + /etc/atspi/config.yaml + systemd unit
+sudo nano /etc/atspi/config.yaml   # driver: adam, io.adam.host, site.unit_id
+sudo ./testadam.sh    # ping + live Modbus snapshot + interactive atspi-bench
+sudo systemctl enable --now atspi  # only after testadam.sh passes
+```
+
+`install.sh` installs into a venv at `/opt/atspi/venv` and points the unit's
+`ExecStart` there, so the `status=127` gotcha below doesn't apply to a scripted
+install. It's idempotent (re-run it after a `git pull` to upgrade) and never
+overwrites an existing config. The manual steps below are the reference for
+what those scripts do and for troubleshooting.
+
 ```bash
 # 1. Confirm the package is on the path. Falls under DEVELOPMENT.md
 #    "Production install"; if the venv vs system-wide split matters
