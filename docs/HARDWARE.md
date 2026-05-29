@@ -200,7 +200,7 @@ If any of steps 4-7 fail, see `docs/RUNBOOK.md`. Common gotchas:
 | `User/Group resolution: 'atspi' not found` | Skipped step 2 | `useradd` command above |
 | modpoll returns `[0, 1, 1, 0, 0, 0]` no matter what the ATS is doing | `driver: mock` still in config | Step 3 sed/nano |
 | modpoll times out | Firewall on Pi (`iptables -L`) or wrong bind (`modbus_server.host`) | Allow 502 in/out; bind to `0.0.0.0` |
-| Sampling loop logs `OSError: ADAM read_coils ... failed: TimeoutError` every cycle | ADAM unreachable or wrong IP | `ping <io.adam.host>` from Pi; check Cat6 |
+| Journal shows `sampling cycle failed (OSError): ADAM read_coils ... failed` then `sampling still failing` reminders | ADAM unreachable or wrong IP | `ping <io.adam.host>` from Pi; check Cat6 |
 
 ## 8. Safety reminders
 

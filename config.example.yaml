@@ -38,6 +38,25 @@ io:
     port: 502
     unit_id: 1
 
+    # Input debounce: a level contact (on-normal, on-emergency, source-
+    # available, engine-start) must read the same value on this many
+    # consecutive 10 Hz samples before the change is published. 3 ≈ 300 ms —
+    # invisible against ATS moves (seconds) but rejects contact bounce / EMI
+    # on long control-wire runs. Raise it for a noisy site; set 1 to disable.
+    # The momentary Load Disconnect contact (DI 0) is never debounced.
+    debounce_samples: 3
+
+    # The ADAM-6060 has no spare DI for an Auto/Manual sense contact (all six
+    # are used), so the ATS mode is operator-asserted here rather than read
+    # from hardware. This is also a command gate (ICD §6 mode policy):
+    #   auto    — all commands allowed (default)
+    #   manual  — only cmd_inhibit allowed; test/force-transfer/bypass rejected
+    #   test    — all commands rejected
+    #   unknown — all commands rejected
+    # Set 'manual' to make the Pi observe-and-inhibit-only — GenWatch can never
+    # force a transfer or start a test through it.
+    assumed_mode: auto
+
 # ─── Site identification ──────────────────────────────────────────────────
 # Reported via the ats_pi_unit_id register (ICD §5.4). GenWatch's
 # expected_unit_id sanity check compares against this value.

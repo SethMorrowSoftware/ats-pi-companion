@@ -31,6 +31,13 @@ class AdamCfg:
     host: str = "192.168.1.251"
     port: int = 502
     unit_id: int = 1
+    # Consecutive identical 10 Hz samples a level input must hold before the
+    # driver publishes the change (rejects contact bounce / EMI). 1 disables.
+    debounce_samples: int = 3
+    # ATS mode the driver reports (the ADAM has no Auto/Manual sense contact).
+    # Also gates command writes per ICD §6: 'auto' allows all, 'manual' allows
+    # only inhibit, 'test'/'unknown' block all. One of: auto|manual|test|unknown.
+    assumed_mode: str = "auto"
 
 
 @dataclass
