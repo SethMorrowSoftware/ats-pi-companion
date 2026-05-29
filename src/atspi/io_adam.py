@@ -103,11 +103,63 @@ ADAM_RETRIES = 1
 # "retry until the write lands" posture for maintained commands.
 PULSE_RELEASE_RETRY_S = 0.25
 
+# Input debounce: a level (maintained) contact must read the same value for
+# this many consecutive 10 Hz samples before the driver publishes the change.
+# 3 samples ≈ 300 ms — invisible against ATS position changes (which take
+# seconds) but enough to reject single-sample contact bounce / EMI pickup on
+# a long control-wire run. The momentary Load Disconnect contact (DI 0) is
+# deliberately NOT debounced (see _Debouncer / read_inputs). 1 disables it.
+DEFAULT_DEBOUNCE_SAMPLES = 3
+
+# The ADAM-6060 has no spare DI for an Auto/Manual sense contact (all six are
+# consumed per HARDWARE.md §3), so the ATS mode can't be read from hardware.
+# It is instead an operator-asserted constant (config io.adam.assumed_mode),
+# which doubles as a command gate: "manual" lets only cmd_inhibit through,
+# "unknown" blocks every command (ICD §6 mode policy).
+VALID_ASSUMED_MODES = frozenset(["auto", "manual", "test", "unknown"])
+
 
 def _bit_pulse(timestamp_mono: float | None, hold_s: float, now_mono: float) -> bool:
     if timestamp_mono is None:
         return False
     return (now_mono - timestamp_mono) < hold_s
+
+
+class _Debouncer:
+    """Per-channel integrator debounce for level (maintained) contacts.
+
+    A channel's published value only flips after the new level has been read
+    on ``samples`` consecutive cycles; a single noisy sample resets that
+    channel's counter, so bounce never reaches the output. The first call
+    seeds the baseline from the raw read, so there is no startup delay before
+    the true state is reported.
+
+    Deliberately NOT applied to the momentary Load Disconnect contact (DI 0):
+    that pulse is caught on the raw read and stretched by TRANSFERRING_HOLD_S,
+    and debouncing it would swallow the very edge we need to detect a transfer.
+    """
+
+    def __init__(self, samples: int):
+        self._samples = max(1, int(samples))
+        self._stable: list[bool] | None = None
+        self._candidate_count: list[int] = []
+
+    def update(self, raw: list[bool]) -> list[bool]:
+        if self._stable is None or len(self._stable) != len(raw):
+            # First read (or a channel-count change): establish the baseline
+            # without waiting out the debounce window.
+            self._stable = list(raw)
+            self._candidate_count = [0] * len(raw)
+            return list(self._stable)
+        for i, level in enumerate(raw):
+            if level == self._stable[i]:
+                self._candidate_count[i] = 0
+            else:
+                self._candidate_count[i] += 1
+                if self._candidate_count[i] >= self._samples:
+                    self._stable[i] = level
+                    self._candidate_count[i] = 0
+        return list(self._stable)
 
 
 class IOAdamDriver:
@@ -116,10 +168,23 @@ class IOAdamDriver:
     loop when a write fails.
     """
 
-    def __init__(self, host: str, port: int = 502, unit_id: int = 1):
+    def __init__(
+        self,
+        host: str,
+        port: int = 502,
+        unit_id: int = 1,
+        debounce_samples: int = DEFAULT_DEBOUNCE_SAMPLES,
+        assumed_mode: str = "auto",
+    ):
         self.host = host
         self.port = port
         self.unit_id = unit_id
+        if assumed_mode not in VALID_ASSUMED_MODES:
+            raise ValueError(
+                f"assumed_mode={assumed_mode!r} invalid; "
+                f"expected one of {sorted(VALID_ASSUMED_MODES)}"
+            )
+        self._assumed_mode = assumed_mode
         self._client: AsyncModbusTcpClient | None = None
         self._connected = False
 
@@ -132,6 +197,10 @@ class IOAdamDriver:
         # report "transferring" position for a brief hold window since
         # the contact is a momentary pulse, not a maintained state.
         self._load_disconnect_seen_mono: float | None = None
+
+        # Debounce for the five level inputs (DI 1-5). DI 0 is momentary and
+        # bypasses this (see read_inputs).
+        self._debounce = _Debouncer(debounce_samples)
 
         # Stuck-relay detection. Tracks the last value commanded to each
         # DO and the monotonic timestamp of that command. Read by
@@ -165,11 +234,19 @@ class IOAdamDriver:
         self._connected = False
 
     async def read_inputs(self) -> InputSnapshot:
-        bits = await self._read_coils(DI_COIL_BASE, 6)
+        raw = await self._read_coils(DI_COIL_BASE, 6)
         now_mono = time.monotonic()
 
-        if bits[DI_LOAD_DISCONNECT]:
+        # Load Disconnect (DI 0) is a momentary pulse: latch it from the RAW
+        # read (debouncing would swallow the edge) and stretch it via
+        # TRANSFERRING_HOLD_S below.
+        if raw[DI_LOAD_DISCONNECT]:
             self._load_disconnect_seen_mono = now_mono
+
+        # The remaining inputs are level/maintained signals — debounce them so
+        # a single noisy sample on a long control-wire run can't flip published
+        # state (and can't spuriously drive the position/transfer-count logic).
+        bits = self._debounce.update(raw)
 
         on_normal = bits[DI_ON_NORMAL]
         on_emerg = bits[DI_ON_EMERGENCY]
@@ -190,7 +267,9 @@ class IOAdamDriver:
             normal_available=bits[DI_NORMAL_AVAIL],
             emergency_available=bits[DI_EMERGENCY_AVAIL],
             engine_start_calling=bits[DI_ENGINE_START],
-            ats_mode="auto",  # ADAM-6060 has no Auto/Manual sense contact
+            # No Auto/Manual sense contact on the ADAM-6060 — operator-asserted
+            # via config (default "auto"). Also gates command writes (ICD §6).
+            ats_mode=self._assumed_mode,
             fault_bits=0,
         )
 

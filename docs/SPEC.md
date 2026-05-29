@@ -131,9 +131,16 @@ Key requirements:
 - **No exceptions escape** — a driver fault bumps a fault bit in the
   register store and the loop continues. We never crash the service
   over a transient I/O hiccup.
-- **Contact debounce** — apply ≥ 5 ms hardware debounce in the I/O
-  driver before publishing. Optionally extend in the store for problem
-  contacts.
+- **Contact debounce** — the ADAM driver runs a per-channel integrator
+  debounce on the five *level* inputs (on-normal, on-emergency, both
+  source-available, engine-start): a change is published only after it
+  holds for `io.adam.debounce_samples` consecutive 10 Hz samples
+  (default 3 ≈ 300 ms), so a single noisy read can't flip published
+  state or spuriously drive the position/transfer-count logic. The
+  *momentary* Load Disconnect contact (DI 0) is deliberately excluded —
+  it's latched on the raw read and stretched by `TRANSFERRING_HOLD_S`, so
+  debouncing it would swallow the edge. The first read seeds the baseline
+  so there's no startup delay. See `io_adam._Debouncer`.
 
 ---
 
@@ -263,6 +270,8 @@ io:
     host: 192.168.1.251   # ADAM-6060's IP
     port: 502
     unit_id: 1
+    debounce_samples: 3   # consecutive samples a level input must hold (1=off)
+    assumed_mode: auto    # no Auto/Manual contact; also gates commands (ICD §6)
 
 site:
   unit_id: 23             # ats_pi_unit_id register (ICD §5.4)

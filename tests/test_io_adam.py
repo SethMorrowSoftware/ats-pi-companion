@@ -378,3 +378,96 @@ async def test_stranded_pulse_relay_surfaces_as_output_fault(driver, monkeypatch
         "a pulse stranded ON past its window must raise a stuck-relay fault, "
         "not be silently masked by stale commanded state"
     )
+
+
+# ─── Input debounce ──────────────────────────────────────────────────────────
+
+
+async def test_first_read_seeds_baseline_without_debounce_delay(driver):
+    """The first read must publish the true state immediately — no startup
+    delay waiting out the debounce window.
+    """
+    fake = driver._client  # noqa: SLF001
+    fake.di_bits[DI_ON_EMERGENCY] = True
+    snap = await driver.read_inputs()
+    assert snap.position == "generator"
+
+
+async def test_debounce_rejects_single_sample_glitch(driver):
+    """A level input that flips for a single sample must NOT change published
+    state (driver default is 3 consecutive samples).
+    """
+    fake = driver._client  # noqa: SLF001
+    fake.di_bits[DI_ON_NORMAL] = True
+    fake.di_bits[DI_NORMAL_AVAIL] = True
+    fake.di_bits[DI_EMERGENCY_AVAIL] = True
+    assert (await driver.read_inputs()).position == "utility"  # seeds baseline
+
+    # One-sample glitch: normal_available drops for exactly one read, then back.
+    fake.di_bits[DI_NORMAL_AVAIL] = False
+    assert (await driver.read_inputs()).normal_available is True, (
+        "single-sample glitch must be debounced away"
+    )
+    fake.di_bits[DI_NORMAL_AVAIL] = True
+    assert (await driver.read_inputs()).normal_available is True
+
+
+async def test_debounce_accepts_sustained_change(driver):
+    """A change held for the full debounce window IS published."""
+    fake = driver._client  # noqa: SLF001
+    fake.di_bits[DI_NORMAL_AVAIL] = True
+    assert (await driver.read_inputs()).normal_available is True  # seed baseline
+
+    fake.di_bits[DI_NORMAL_AVAIL] = False
+    # Default debounce = 3 samples: not published until the 3rd consecutive read.
+    assert (await driver.read_inputs()).normal_available is True
+    assert (await driver.read_inputs()).normal_available is True
+    assert (await driver.read_inputs()).normal_available is False
+
+
+async def test_load_disconnect_pulse_is_not_debounced(driver):
+    """DI 0 is momentary — a single raw high must register 'transferring'
+    immediately, despite the debounce applied to the other channels.
+    """
+    fake = driver._client  # noqa: SLF001
+    fake.di_bits[DI_ON_NORMAL] = True
+    await driver.read_inputs()  # seed baseline on utility
+    fake.di_bits[DI_LOAD_DISCONNECT] = True
+    snap = await driver.read_inputs()
+    assert snap.position == "transferring", (
+        "a momentary DI0 pulse must not be debounced away"
+    )
+
+
+async def test_debounce_samples_one_disables_debounce():
+    d = IOAdamDriver(host="127.0.0.1", port=5020, debounce_samples=1)
+    d._client = FakeClient()  # noqa: SLF001
+    d._connected = True  # noqa: SLF001
+    fake = d._client  # noqa: SLF001
+    fake.di_bits[DI_NORMAL_AVAIL] = True
+    await d.read_inputs()  # seed
+    fake.di_bits[DI_NORMAL_AVAIL] = False
+    assert (await d.read_inputs()).normal_available is False, (
+        "debounce_samples=1 must publish a change on the very next read"
+    )
+
+
+# ─── Assumed mode (no Auto/Manual sense contact) ─────────────────────────────
+
+
+async def test_assumed_mode_is_reported_in_snapshot():
+    d = IOAdamDriver(host="127.0.0.1", port=5020, assumed_mode="manual")
+    d._client = FakeClient()  # noqa: SLF001
+    d._connected = True  # noqa: SLF001
+    snap = await d.read_inputs()
+    assert snap.ats_mode == "manual"
+
+
+async def test_assumed_mode_defaults_to_auto(driver):
+    snap = await driver.read_inputs()
+    assert snap.ats_mode == "auto"
+
+
+def test_invalid_assumed_mode_raises():
+    with pytest.raises(ValueError, match="assumed_mode"):
+        IOAdamDriver(host="127.0.0.1", port=5020, assumed_mode="bogus")

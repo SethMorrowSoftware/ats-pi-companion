@@ -10,6 +10,7 @@ import asyncio
 import logging
 import signal
 import sys
+import time
 
 from . import __version__
 from .config import load_config
@@ -25,6 +26,13 @@ from .state import CommandIntent, RegisterStore
 # Half of systemd's WatchdogSec=60 — gives plenty of margin while still
 # catching a hung event loop within a minute.
 SYSTEMD_WATCHDOG_PING_S = 30.0
+
+# Sampling loop cadence (10 Hz) and how often to re-log a sustained I/O
+# failure. A hard ADAM/network outage fails every cycle; logging each one
+# would emit ~10 lines/s and bury everything else in the journal, so the
+# first failure is logged loudly and repeats are throttled to this cadence.
+SAMPLE_INTERVAL_S = 0.1
+SAMPLING_FAILURE_REMINDER_S = 30.0
 
 log = logging.getLogger("atspi")
 
@@ -44,6 +52,8 @@ def _build_io_driver(cfg) -> IODriver:
             host=cfg.io.adam.host,
             port=cfg.io.adam.port,
             unit_id=cfg.io.adam.unit_id,
+            debounce_samples=cfg.io.adam.debounce_samples,
+            assumed_mode=cfg.io.adam.assumed_mode,
         )
     raise ValueError(f"unknown io.driver: {driver_name!r}")
 
@@ -53,6 +63,8 @@ async def _sampling_loop(driver: IODriver, store: RegisterStore) -> None:
     store; exceptions caught and reported as fault bits.
     """
     log.info("sampling loop starting at 10 Hz")
+    consecutive_failures = 0
+    last_failure_log_mono = 0.0
     while True:
         try:
             inputs = await driver.read_inputs()
@@ -67,12 +79,30 @@ async def _sampling_loop(driver: IODriver, store: RegisterStore) -> None:
             # the next successful drive_outputs() in _dispatch_command.
             if not driver.check_output_consistency(outputs):
                 store.set_output_fault(True)
+            if consecutive_failures:
+                log.info(
+                    "sampling recovered after %d failed cycle(s) (~%.0fs)",
+                    consecutive_failures, consecutive_failures * SAMPLE_INTERVAL_S,
+                )
+                consecutive_failures = 0
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
-            log.exception("sampling cycle failed: %s", e)
             store.set_input_fault(True)
-        await asyncio.sleep(0.1)
+            consecutive_failures += 1
+            now = time.monotonic()
+            # Log the first failure of a streak loudly; throttle repeats so a
+            # sustained outage doesn't flood the journal at 10 lines/s.
+            if consecutive_failures == 1:
+                log.warning("sampling cycle failed (%s): %s", type(e).__name__, e)
+                last_failure_log_mono = now
+            elif now - last_failure_log_mono >= SAMPLING_FAILURE_REMINDER_S:
+                log.warning(
+                    "sampling still failing after %d cycles (~%.0fs): %s",
+                    consecutive_failures, consecutive_failures * SAMPLE_INTERVAL_S, e,
+                )
+                last_failure_log_mono = now
+        await asyncio.sleep(SAMPLE_INTERVAL_S)
 
 
 async def _dispatch_command(driver: IODriver, store: RegisterStore, intent: CommandIntent) -> None:

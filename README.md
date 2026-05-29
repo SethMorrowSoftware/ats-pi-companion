@@ -113,7 +113,7 @@ docs/
   DEVELOPMENT.md     dev environment, mock controls, test layout
   RUNBOOK.md         field troubleshooting
 
-tests/               197 tests, ruff-clean, CI on every PR
+tests/               209 tests, ruff-clean, CI on every PR
 systemd/atspi.service production unit (Type=notify, WatchdogSec=60)
 ```
 

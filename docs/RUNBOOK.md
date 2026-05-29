@@ -117,20 +117,23 @@ Two distinct causes share this bit:
 Look for these in the journal:
 
 ```
-ADAM read_coils(0, 6) failed: ...
-ADAM read_coils(0, 6) error: ...
+sampling cycle failed (OSError): ADAM read_coils(0, 6) failed: ...
+sampling still failing after 300 cycles (~30s): ADAM read_coils(0, 6) failed: ...
+sampling recovered after 12 failed cycle(s) (~1s)
 ```
 
-→ Same diagnosis flow as §2 step 3. The bit clears the next time the
-sampling loop reads successfully.
+The sampling loop logs the **first** failure of a streak at WARNING, then
+throttles repeats to one reminder every ~30 s (so a hard outage doesn't
+flood the journal at 10 lines/s), and logs `sampling recovered …` when
+reads succeed again. INPUT_FAULT clears on that first successful read.
 
 **Is it a transient network blip or a real wiring fault?**
-The driver uses a 500 ms Modbus timeout (1 retry). A single failed
-read at the boundary of "slow ADAM" vs "no ADAM" is normal and
-self-recovers in 100 ms. Worry only if:
+The driver uses a 500 ms Modbus timeout (1 retry). A single
+`sampling cycle failed` line immediately followed by `sampling recovered`
+is a normal transient. Worry only if:
 
-- The error message repeats every cycle for >5 s — likely cable,
-  switch, or ADAM power
+- You see the `sampling still failing after N cycles` reminders keep
+  coming (the outage is sustained) — likely cable, switch, or ADAM power
 - `ping <adam-ip>` from the Pi fails — definitely network/cable
 - `ping` works but every Modbus read times out — ADAM is locked up,
   power-cycle it

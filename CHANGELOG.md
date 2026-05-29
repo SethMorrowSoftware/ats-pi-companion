@@ -9,6 +9,35 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 ## [Unreleased]
 
+### Added (pre-hardware hardening)
+
+- **Input debounce in the ADAM driver.** The five level inputs (on-normal,
+  on-emergency, both source-available, engine-start) now pass through a
+  per-channel integrator debounce: a change is published only after it holds
+  for `io.adam.debounce_samples` consecutive 10 Hz samples (default 3 ≈
+  300 ms). A single noisy read from contact bounce or EMI on a long
+  control-wire run can no longer flip published state or drive the
+  position/transfer-count logic. The momentary Load Disconnect contact (DI 0)
+  is deliberately excluded — it's latched raw and stretched by
+  `TRANSFERRING_HOLD_S`, so debouncing it would swallow the transfer edge.
+  The first read seeds the baseline, so there's no startup delay. `1` disables.
+- **`io.adam.assumed_mode` config.** The ADAM-6060 has no spare DI for an
+  Auto/Manual sense contact, so ATS mode was hardcoded to `auto` — which made
+  the ICD §6 mode policy inert (every command always permitted). Mode is now
+  an explicit, operator-asserted config value (default `auto`, unchanged
+  behaviour) that doubles as a command gate: `manual` lets only `cmd_inhibit`
+  through, `test`/`unknown` block all commands. Setting `manual` makes the Pi
+  observe-and-inhibit-only — GenWatch can never force a transfer or start a
+  test through it. An invalid value fails fast at startup.
+
+### Changed (operability)
+
+- The sampling loop no longer logs a full traceback every 100 ms during an
+  ADAM/network outage (that flooded the journal at ~10 lines/s and buried
+  other logs). It logs the first failure of a streak at WARNING, throttles
+  repeats to one reminder every ~30 s, and logs `sampling recovered …` when
+  reads succeed again. RUNBOOK §3(a) and HARDWARE §7 updated to match.
+
 ### Fixed (pre-hardware reliability sweep)
 
 - `IOAdamDriver` no longer strands a pulsed relay (Test, Bypass) asserted

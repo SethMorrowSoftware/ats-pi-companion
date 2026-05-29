@@ -69,7 +69,7 @@ python -m pytest tests/ -v
 python -m ruff check src/ tests/
 ```
 
-The suite (currently 197 tests) runs entirely without hardware — mock
+The suite (currently 209 tests) runs entirely without hardware — mock
 driver for the I/O layer, a fake pymodbus client for the ADAM driver,
 `tmp_path` for persistence. CI runs both jobs on every push plus a
 `soak` job that starts the real binary, performs a real Modbus read,

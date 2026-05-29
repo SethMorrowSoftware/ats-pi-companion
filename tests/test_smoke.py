@@ -61,6 +61,30 @@ def test_config_accepts_empty_file(tmp_path):
     assert cfg.io.driver == "mock"
 
 
+def test_adam_config_defaults_and_overrides(tmp_path):
+    """The ADAM driver knobs (debounce, assumed_mode) load with sane defaults
+    and accept overrides through the strict loader.
+    """
+    p = tmp_path / "cfg.yaml"
+    p.write_text("io:\n  driver: adam\n")
+    cfg = load_config(p)
+    assert cfg.io.adam.debounce_samples == 3
+    assert cfg.io.adam.assumed_mode == "auto"
+
+    p.write_text(
+        "io:\n"
+        "  driver: adam\n"
+        "  adam:\n"
+        "    host: 10.0.0.9\n"
+        "    debounce_samples: 5\n"
+        "    assumed_mode: manual\n"
+    )
+    cfg = load_config(p)
+    assert cfg.io.adam.host == "10.0.0.9"
+    assert cfg.io.adam.debounce_samples == 5
+    assert cfg.io.adam.assumed_mode == "manual"
+
+
 @pytest.mark.asyncio
 async def test_mock_driver_round_trip():
     driver = IOMockDriver()
