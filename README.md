@@ -84,9 +84,20 @@ a running service through state transitions without recompiling.
 
 ## Production deployment
 
-The literal command sequence from "Pi configured" to "GenWatch sees
-the ATS" is in [`docs/HARDWARE.md §7`](./docs/HARDWARE.md), including
-the five most likely first-boot gotchas. If something goes sideways
+Two helper scripts wrap the commissioning sequence:
+
+```bash
+sudo ./install.sh     # service user + venv + config + systemd unit (doesn't start it)
+# edit /etc/atspi/config.yaml: driver: adam, io.adam.host, site.unit_id
+sudo ./testadam.sh    # ping + live Modbus snapshot + interactive atspi-bench wiring check
+sudo systemctl enable --now atspi
+```
+
+`install.sh` is idempotent and never clobbers an existing config; it
+deliberately leaves the service stopped so you bench-verify the ADAM
+*before* the switch is ever driven. The literal step-by-step (and the
+five most likely first-boot gotchas) is in
+[`docs/HARDWARE.md §7`](./docs/HARDWARE.md). If something goes sideways
 at 2am, [`docs/RUNBOOK.md`](./docs/RUNBOOK.md) is the field guide.
 
 ## Project layout

@@ -9,6 +9,18 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 ## [Unreleased]
 
+### Added (commissioning tooling)
+
+- **`install.sh`** — one-shot Pi installer: creates the `atspi` service
+  user/group, installs the package into a venv at `/opt/atspi/venv`, drops in
+  the config (never clobbering an existing one) and the systemd unit (with
+  `ExecStart` pointed at the venv). Idempotent; re-run after `git pull` to
+  upgrade. Deliberately does NOT start the service — you bench-verify first.
+- **`testadam.sh`** — bench-verify the ADAM-6060 before enabling the service:
+  pings it, proves Modbus TCP works and prints a live snapshot of the 6 DIs +
+  relays, then launches the interactive `atspi-bench` wiring walkthrough.
+  Target host/port/unit default to `/etc/atspi/config.yaml`.
+
 ### Added (pre-hardware hardening)
 
 - **Input debounce in the ADAM driver.** The five level inputs (on-normal,
