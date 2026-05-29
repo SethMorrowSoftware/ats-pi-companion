@@ -202,11 +202,33 @@ class RegisterStore:
             new_last_to_util = prev.last_retransfer_to_util_ts
             new_lifetime = prev.transfer_count_lifetime
 
+            # Count a transfer only when the new position is reached from a
+            # position that legitimately precedes it. The valid predecessors
+            # are the prior rail or the brief "transferring" hold (driven by
+            # the Load Disconnect pulse during the stroke):
+            #   • transfer-to-gen:   utility | transferring → generator
+            #   • retransfer-to-util: generator | transferring → utility
+            #
+            # Excluding "unknown" as a predecessor matters two ways:
+            #   1. Boot position defaults to "unknown", so a plain
+            #      "unknown → generator" first read would otherwise increment
+            #      transfer_count_lifetime on *every reboot* that happens while
+            #      the ATS is sitting on the generator (e.g. during a utility
+            #      outage) — the persisted count would drift up with reboots.
+            #   2. A momentary both-aux-open glitch reads as "unknown"; the
+            #      bounce back to the same rail would otherwise double-count.
+            # Including "transferring" as a predecessor is what lets the
+            # realistic gen → transferring → utility retransfer stamp
+            # last_retransfer_to_util_ts at all (the Load Disconnect hold means
+            # the position seen just before "utility" is "transferring", not
+            # "generator").
             transferred_to_gen = (
-                prev.position != "generator" and inputs.position == "generator"
+                prev.position in ("utility", "transferring")
+                and inputs.position == "generator"
             )
             retransferred_to_util = (
-                prev.position == "generator" and inputs.position == "utility"
+                prev.position in ("generator", "transferring")
+                and inputs.position == "utility"
             )
 
             if transferred_to_gen:

@@ -70,6 +70,63 @@ def test_retransfer_to_utility_updates_timestamp_not_counter():
     assert low > 0
 
 
+def test_reboot_while_on_generator_does_not_count_transfer():
+    """Boot position defaults to 'unknown'. The first read landing on
+    'generator' (a reboot during a utility outage) must NOT count as a new
+    transfer — otherwise the persisted lifetime count drifts up on every
+    restart while the ATS sits on the generator.
+    """
+    store = RegisterStore()
+    store.apply_input_snapshot(_inputs(position="generator", normal_available=False))
+    assert store.read_register(ADDR_TRANSFER_COUNT_LIFETIME + 1) == 0
+    assert store.read_register(ADDR_TRANSFER_COUNT_24H + 1) == 0
+
+
+def test_position_glitch_through_unknown_does_not_double_count():
+    """A momentary both-aux-open glitch reads as 'unknown'. Bouncing back to
+    the same rail must not register a phantom transfer.
+    """
+    store = RegisterStore()
+    store.apply_input_snapshot(_inputs(position="utility"))
+    store.apply_input_snapshot(_inputs(position="generator"))  # real transfer
+    assert store.read_register(ADDR_TRANSFER_COUNT_LIFETIME + 1) == 1
+    store.apply_input_snapshot(_inputs(position="unknown"))     # glitch
+    store.apply_input_snapshot(_inputs(position="generator"))   # bounce back
+    assert store.read_register(ADDR_TRANSFER_COUNT_LIFETIME + 1) == 1
+
+
+def test_transfer_through_transferring_counts_once():
+    """The realistic utility → transferring → generator stroke counts exactly
+    one transfer (the position seen just before 'generator' is 'transferring').
+    """
+    store = RegisterStore()
+    store.apply_input_snapshot(_inputs(position="utility"))
+    store.apply_input_snapshot(_inputs(position="transferring"))
+    store.apply_input_snapshot(_inputs(position="generator"))
+    assert store.read_register(ADDR_TRANSFER_COUNT_LIFETIME + 1) == 1
+
+
+def test_retransfer_through_transferring_stamps_timestamp():
+    """On real hardware a retransfer is generator → transferring → utility
+    (the Load Disconnect pulse holds 'transferring' for ~2 s). The retransfer
+    timestamp MUST still be stamped even though the position seen just before
+    'utility' is 'transferring', not 'generator'.
+    """
+    from atspi.state import ADDR_LAST_RETRANSFER_TS
+    store = RegisterStore()
+    store.apply_input_snapshot(_inputs(position="utility"))
+    store.apply_input_snapshot(_inputs(position="generator"))
+    store.apply_input_snapshot(_inputs(position="transferring"))
+    store.apply_input_snapshot(_inputs(position="utility"))
+    hi = store.read_register(ADDR_LAST_RETRANSFER_TS)
+    lo = store.read_register(ADDR_LAST_RETRANSFER_TS + 1)
+    assert ((hi << 16) | lo) > 0, (
+        "retransfer via 'transferring' must stamp last_retransfer_to_util_ts"
+    )
+    # And it must not be miscounted as a forward transfer.
+    assert store.read_register(ADDR_TRANSFER_COUNT_LIFETIME + 1) == 1
+
+
 def test_24h_count_evicts_old_entries(monkeypatch):
     """Transfers older than 24h drop out of the rolling counter."""
     fake_wall = [1_700_000_000]
