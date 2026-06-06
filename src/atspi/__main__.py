@@ -54,6 +54,7 @@ def _build_io_driver(cfg) -> IODriver:
             unit_id=cfg.io.adam.unit_id,
             debounce_samples=cfg.io.adam.debounce_samples,
             assumed_mode=cfg.io.adam.assumed_mode,
+            di_read=cfg.io.adam.di_read,
         )
     raise ValueError(f"unknown io.driver: {driver_name!r}")
 

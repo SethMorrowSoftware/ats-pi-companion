@@ -121,9 +121,10 @@ def _ask_yes_no_skip(
 
 
 async def _read_dis(driver: IOAdamDriver) -> list[bool]:
-    """Read all six DIs as a list of bools."""
-    bits = await driver._read_coils(0x0000, 6)  # noqa: SLF001
-    return list(bits)
+    """Read all six DIs as a list of bools, using the driver's configured
+    DI function code (io.adam.di_read / --di-read).
+    """
+    return await driver._read_di_bits(6)  # noqa: SLF001
 
 
 async def _read_dos(driver: IOAdamDriver) -> list[bool]:
@@ -210,13 +211,19 @@ async def _verify_do(
     elif ch == DO_BYPASS_DELAY:
         await driver.drive_outputs(bypass_delay_pulse_ms=1500)
     elif ch == DO_FORCE_TRANSFER:
-        await driver.drive_outputs(force_transfer=True)
-        await asyncio.sleep(DO_ASSERT_HOLD_S)
-        await driver.drive_outputs(force_transfer=False)
+        # try/finally so an interrupt (Ctrl-C, dropped SSH) during the hold can
+        # never strand the ATS in forced-transfer — the release always runs.
+        try:
+            await driver.drive_outputs(force_transfer=True)
+            await asyncio.sleep(DO_ASSERT_HOLD_S)
+        finally:
+            await driver.drive_outputs(force_transfer=False)
     elif ch == DO_INHIBIT:
-        await driver.drive_outputs(inhibit=True)
-        await asyncio.sleep(DO_ASSERT_HOLD_S)
-        await driver.drive_outputs(inhibit=False)
+        try:
+            await driver.drive_outputs(inhibit=True)
+            await asyncio.sleep(DO_ASSERT_HOLD_S)
+        finally:
+            await driver.drive_outputs(inhibit=False)
 
     # Wait a moment for any pulse to complete + release latency.
     await asyncio.sleep(0.3)
@@ -238,6 +245,7 @@ async def _verify_do(
 async def _run(
     host: str, port: int, unit_id: int,
     *,
+    di_read: str = "coils",
     skip_dis: bool = False,
     skip_dos: bool = False,
     output_json: bool = False,
@@ -245,9 +253,10 @@ async def _run(
     stream_out: TextIO,
 ) -> int:
     print(f"atspi-bench v{__version__}", file=stream_out)
-    print(f"target ADAM-6060: {host}:{port} unit_id={unit_id}", file=stream_out)
+    print(f"target ADAM-6060: {host}:{port} unit_id={unit_id} di_read={di_read}",
+          file=stream_out)
 
-    driver = IOAdamDriver(host=host, port=port, unit_id=unit_id)
+    driver = IOAdamDriver(host=host, port=port, unit_id=unit_id, di_read=di_read)
     connected = await driver.connect()
     if not connected:
         print(f"FAIL: cannot reach ADAM at {host}:{port}", file=stream_out)
@@ -274,6 +283,17 @@ async def _run(
                 results.append(r)
                 print(f"  result: {r.outcome.upper()}: {r.detail}", file=stream_out)
     finally:
+        # Safety net: never leave a maintained relay (Force Transfer / Inhibit)
+        # asserted on the way out — including on Ctrl-C or an exception mid-test.
+        # _verify_do also releases per-channel; this is the belt-and-suspenders
+        # backstop (and the ADAM host watchdog is the hardware layer below it).
+        # Only meaningful when we actually drove outputs this run.
+        if not skip_dos:
+            try:
+                await driver.drive_outputs(force_transfer=False, inhibit=False)
+            except Exception as e:  # noqa: BLE001
+                print(f"WARNING: failed to release maintained outputs on exit: {e}",
+                      file=stream_out)
         await driver.close()
 
     return _report(results, output_json=output_json, stream_out=stream_out)
@@ -317,6 +337,11 @@ def main() -> None:
     ap.add_argument("--host", required=True, help="ADAM-6060 IP address")
     ap.add_argument("--port", type=int, default=502)
     ap.add_argument("--unit-id", type=int, default=1, dest="unit_id")
+    ap.add_argument("--di-read", default="coils", dest="di_read",
+                    choices=["coils", "discrete_inputs"],
+                    help="Modbus function code for reading DIs: 'coils' (FC01, "
+                         "default) or 'discrete_inputs' (FC02). If the DIs read "
+                         "all-0 with the default, re-run with discrete_inputs.")
     ap.add_argument("--skip-dis", action="store_true",
                     help="Skip the digital-input verification block")
     ap.add_argument("--skip-dos", action="store_true",
@@ -331,6 +356,7 @@ def main() -> None:
         host=args.host,
         port=args.port,
         unit_id=args.unit_id,
+        di_read=args.di_read,
         skip_dis=args.skip_dis,
         skip_dos=args.skip_dos,
         output_json=args.output_json,

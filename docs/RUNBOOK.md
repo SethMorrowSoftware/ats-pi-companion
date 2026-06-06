@@ -106,6 +106,22 @@ Deploy default is **23** (SITE-23). A mismatch silently drops the ATS-Pi
 to non-authoritative in GenWatch — visible only as a `(via gen telemetry)`
 annotation in the Live view, not as an error.
 
+### Step 5: Are the DI values plausible? (wrong `di_read`)
+
+Reads succeeding but `position` stuck at `unknown` and both
+`*_available` registers reading `0` regardless of the ATS state is the
+signature of the **wrong DI Modbus function code**. No `INPUT_FAULT` is
+raised (the read itself succeeds; the bits are just always 0).
+
+```bash
+modpoll -m tcp -a 1 -r 1 -c 6 <ats-pi>     # 0x0000-0x0005 core state
+```
+
+→ Switch `io.adam.di_read` between `coils` (FC01) and `discrete_inputs`
+(FC02) and restart. Confirm at the source with
+`testadam.sh --di-read discrete_inputs` (HARDWARE.md §3). On the
+ADAM-6000 series the documented DI mapping is FC02.
+
 ---
 
 ## 3. "fault_summary shows INPUT_FAULT (bit 0)"
@@ -223,6 +239,14 @@ did exactly what the contract requires.
 
 When GenWatch reconnects, the watchdog re-arms automatically; the next
 Modbus read clears the `released` flag.
+
+This software watchdog only covers *"GenWatch silent, Pi alive."* If the
+**Pi itself** dies (power loss, panic) with a maintained command
+asserted, only the **ADAM-6060's own host watchdog / DO fail-safe**
+(HARDWARE.md §5.1) can release the relay. If you find the ATS stuck in
+forced-transfer or inhibit after a Pi power event, check that the ADAM
+host watchdog is actually enabled — verify with `atspi-bench --skip-dis`
+(assert DO 2, pull the Pi's network cable, watch the relay drop).
 
 ---
 

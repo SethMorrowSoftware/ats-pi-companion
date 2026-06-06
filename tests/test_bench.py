@@ -53,17 +53,27 @@ class FakeClient:
     def close(self) -> None:
         self.connected = False
 
+    def _next_di(self, count):
+        if self.di_sequence and self.di_index < len(self.di_sequence):
+            bits = list(self.di_sequence[self.di_index])
+        else:
+            bits = [False] * 6
+        self.di_index += 1
+        return bits
+
     async def read_coils(self, address, count, slave):
         if address == DI_COIL_BASE:
-            if self.di_sequence and self.di_index < len(self.di_sequence):
-                bits = list(self.di_sequence[self.di_index])
-            else:
-                bits = [False] * 6
-            self.di_index += 1
+            bits = self._next_di(count)
         elif address == DO_COIL_BASE:
             bits = list(self.do_bits)
         else:
             bits = [False] * count
+        while len(bits) % 8 != 0:
+            bits.append(False)
+        return FakeResult(bits=bits[:max(count, 8)])
+
+    async def read_discrete_inputs(self, address, count, slave):
+        bits = self._next_di(count) if address == DI_COIL_BASE else [False] * count
         while len(bits) % 8 != 0:
             bits.append(False)
         return FakeResult(bits=bits[:max(count, 8)])
@@ -82,8 +92,8 @@ def fake_driver(monkeypatch):
     fake = FakeClient()
 
     class _PatchedDriver(bench.IOAdamDriver):
-        def __init__(self, host, port=502, unit_id=1):
-            super().__init__(host=host, port=port, unit_id=unit_id)
+        def __init__(self, host, port=502, unit_id=1, di_read="coils"):
+            super().__init__(host=host, port=port, unit_id=unit_id, di_read=di_read)
             self._client = fake  # noqa: SLF001
             self._connected = True  # noqa: SLF001
 
@@ -256,6 +266,54 @@ async def test_bench_di_pulse_confirmed_by_operator(fake_driver):
     assert "DI0" in out
     assert "[OK]" in out
     assert code == 3
+
+
+async def test_verify_do_releases_force_transfer_on_interrupt(monkeypatch):
+    """If the operator interrupts (Ctrl-C) during the Force-Transfer hold, the
+    relay MUST still be released by the try/finally — never strand the ATS in
+    forced-transfer. Regression for the bench stranded-relay hardening.
+    """
+    from atspi.io_adam import DO_FORCE_TRANSFER, IOAdamDriver
+
+    driver = IOAdamDriver(host="127.0.0.1", port=5020)
+    fake = FakeClient()
+    driver._client = fake  # noqa: SLF001
+    driver._connected = True  # noqa: SLF001
+
+    async def interrupt_the_hold(_secs):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(bench.asyncio, "sleep", interrupt_the_hold)
+
+    stream_in = _scripted_stdin("y")  # 'y' → ready to drive
+    stream_out = io.StringIO()
+    with pytest.raises(KeyboardInterrupt):
+        await bench._verify_do(
+            driver, DO_FORCE_TRANSFER, "force transfer", stream_in, stream_out,
+        )
+
+    coil = DO_COIL_BASE + DO_FORCE_TRANSFER
+    assert (coil, True) in fake.writes, "should have asserted force_transfer"
+    assert (coil, False) in fake.writes, "finally must release force_transfer"
+    ft_writes = [v for a, v in fake.writes if a == coil]
+    assert ft_writes[-1] is False, "last action on the coil must be release"
+
+
+async def test_bench_releases_maintained_outputs_on_exit(fake_driver):
+    """After a full DO run, the bench tool's _run() safety net leaves both
+    maintained relays (Force Transfer, Inhibit) de-energised.
+    """
+    from atspi.io_adam import DO_FORCE_TRANSFER, DO_INHIBIT
+
+    script = ["y", "y"] * 4  # drive + confirm each DO
+    stream_in = _scripted_stdin(*script)
+    stream_out = io.StringIO()
+    await bench._run(
+        "127.0.0.1", 5020, 1,
+        skip_dis=True, stream_in=stream_in, stream_out=stream_out,
+    )
+    for do in (DO_FORCE_TRANSFER, DO_INHIBIT):
+        last = [v for a, v in fake_driver.writes if a == DO_COIL_BASE + do][-1]
+        assert last is False, f"DO{do} must be released by the time _run exits"
 
 
 async def test_bench_unreachable_adam_exits_2(monkeypatch):

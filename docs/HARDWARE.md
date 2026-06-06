@@ -67,6 +67,24 @@ becomes a single channel on the ADAM-6060.
 **Do not** wire DO 4 or DO 5 to ATS terminals 14, 15, or 16 — those are
 factory-use only.
 
+### Digital-input read function code (FC01 vs FC02)
+
+The driver reads the 6 DIs with a Modbus function code chosen by
+`io.adam.di_read` (`coils` = FC01, the default, or `discrete_inputs` =
+FC02). On the ADAM-6000 series the *documented* mapping for digital
+inputs is **FC02 (read discrete inputs)** — FC01 (read coils) reads the
+*relay outputs*. Some firmware also mirrors the DIs into the coil space,
+so FC01 may work too. **This must be confirmed on the bench** (it's the
+first thing `testadam.sh` exercises). If the live DI snapshot reads
+all-`0` or `position` stays `unknown` no matter what the ATS is doing,
+flip to `discrete_inputs` — no code change needed:
+
+```bash
+sudo ./testadam.sh --di-read discrete_inputs     # then set io.adam.di_read to match
+```
+
+The relay outputs (DOs) are always coils (FC01 read-back / FC05 write).
+
 ## 4. Network
 
 - ADAM-6060: static IP, recommend `192.168.1.251`, on the OT VLAN
@@ -95,8 +113,46 @@ customer terminals).
 6. Wire Cat6 to both Pi and ADAM, through surge protectors, out to LAN
 7. Remove LOTO, re-energize
 8. Configure ADAM IP (it ships at `10.0.0.1` — use Advantech's utility)
-9. Configure Pi network, install Raspbian, then this project per
-   `docs/DEVELOPMENT.md`
+9. **Configure the ADAM host watchdog / DO fail-safe** — see §5.1 below
+10. Configure Pi network, install Raspbian, then this project per
+    `docs/DEVELOPMENT.md`
+
+### 5.1 Configure the ADAM host watchdog (critical hardware fail-safe)
+
+> **Do not skip this.** It is the only thing that releases a maintained
+> relay if the *Pi itself* dies. Configure it while you have the
+> Advantech utility open in step 8.
+
+The service has a software safety watchdog (`safety.py`, ICD §8.3): if
+GenWatch stops polling, it auto-releases `cmd_inhibit` /
+`cmd_force_transfer` after 30 s. That covers *"GenWatch went silent while
+the Pi is alive."* It **cannot** cover *"the Pi lost power / kernel
+panicked / was unplugged"* while Force Transfer or Inhibit is asserted —
+once the software is gone, the ADAM latches the last commanded relay
+state **indefinitely**, leaving the ATS forced to the generator (or
+transfers blocked) with nothing left to release it.
+
+The ADAM-6000 series has the hardware backstop for exactly this: a
+**host idle (communication watchdog) timer** with a per-channel **Digital
+Output Safety Value**. When the host stops talking Modbus for the
+configured timeout, the ADAM drives each DO to its safe value on its own.
+
+Configure it (Advantech ADAM/Apax .NET Utility, or the module's web UI):
+
+| Setting | Value | Why |
+|---|---|---|
+| Host idle / comms watchdog | **Enabled** | Arms the fail-safe |
+| Watchdog timeout | **5–10 s** | Longer than a sampling blip, shorter than the 30 s software watchdog so it only fires on true host loss |
+| DO 0 (Test) safe value | **0 / OFF** | De-energise |
+| DO 1 (Force Transfer) safe value | **0 / OFF** | Release the forced transfer |
+| DO 2 (Inhibit) safe value | **0 / OFF** | Stop inhibiting |
+| DO 3 (Bypass Delay) safe value | **0 / OFF** | De-energise |
+| DO 4 / DO 5 | **0 / OFF** | Spares, keep de-energised |
+
+After enabling it, **verify**: with the service stopped, assert Inhibit
+once (`atspi-bench --skip-dis`, drive DO 2), then pull the Pi's network
+cable and confirm the ADAM relay drops within the timeout (watch the
+DO 2 LED on the module). Re-seat the cable when done.
 
 ## 6. Verifying contact reads (before integrating with GenWatch)
 
@@ -122,12 +178,20 @@ atspi-bench --host 192.168.1.251 --port 502 --unit-id 1
 Exit codes: 0 = all checks passed, 1 = at least one failed, 2 = ADAM
 unreachable, 3 = skipped at least one check (incomplete).
 
-For ad-hoc spot checks without the interactive flow:
+For ad-hoc spot checks without the interactive flow (note the `-t` flag —
+bare `modpoll` reads holding registers, not the DI bits):
 
 ```bash
-# Read all six DIs as a packed register
-modpoll -m tcp -a 1 -r 1 -c 1 192.168.1.251
+# Read the six DIs as discrete inputs (FC02, -t 1) ...
+modpoll -m tcp -a 1 -r 1 -c 6 -t 1 192.168.1.251
+# ... or as coils (FC01, -t 0) if io.adam.di_read: coils works on your unit
+modpoll -m tcp -a 1 -r 1 -c 6 -t 0 192.168.1.251
+# Read the six relay outputs (always coils, FC01)
+modpoll -m tcp -a 1 -r 17 -c 6 -t 0 192.168.1.251
 ```
+
+Whichever DI function code shows the contacts changing is the value to
+put in `io.adam.di_read` (see §3). `testadam.sh` does this for you.
 
 Then physically:
 
@@ -149,10 +213,15 @@ operator can self-rescue without paging an SRE.
 
 ```bash
 sudo ./install.sh     # service user + venv + /etc/atspi/config.yaml + systemd unit
-sudo nano /etc/atspi/config.yaml   # driver: adam, io.adam.host, site.unit_id
+sudo nano /etc/atspi/config.yaml   # driver: adam, io.adam.host, site.unit_id, di_read
+# Configure the ADAM host watchdog / DO fail-safe now (§5.1) — don't skip it.
 sudo ./testadam.sh    # ping + live Modbus snapshot + interactive atspi-bench
 sudo systemctl enable --now atspi  # only after testadam.sh passes
 ```
+
+If `testadam.sh`'s DI snapshot is all-`0` while the ATS is clearly on a
+source, re-run it with `--di-read discrete_inputs` and set
+`io.adam.di_read` to match (§3).
 
 `install.sh` installs into a venv at `/opt/atspi/venv` and points the unit's
 `ExecStart` there, so the `status=127` gotcha below doesn't apply to a scripted
@@ -214,6 +283,7 @@ If any of steps 4-7 fail, see `docs/RUNBOOK.md`. Common gotchas:
 | `systemctl status` → `code=exited, status=127` | `/usr/local/bin/atspi` doesn't exist (venv install) | Point `ExecStart=` at the venv's atspi binary |
 | `User/Group resolution: 'atspi' not found` | Skipped step 2 | `useradd` command above |
 | modpoll returns `[0, 1, 1, 0, 0, 0]` no matter what the ATS is doing | `driver: mock` still in config | Step 3 sed/nano |
+| All DIs read `0` / `position` stuck `unknown` / every `atspi-bench` DI step says "no bit change" | Wrong DI function code | Set `io.adam.di_read: discrete_inputs` (§3); confirm with `testadam.sh --di-read discrete_inputs` |
 | modpoll times out | Firewall on Pi (`iptables -L`) or wrong bind (`modbus_server.host`) | Allow 502 in/out; bind to `0.0.0.0` |
 | Journal shows `sampling cycle failed (OSError): ADAM read_coils ... failed` then `sampling still failing` reminders | ADAM unreachable or wrong IP | `ping <io.adam.host>` from Pi; check Cat6 |
 
@@ -228,3 +298,7 @@ If any of steps 4-7 fail, see `docs/RUNBOOK.md`. Common gotchas:
 - Never use the spare DO channels (DO 4, DO 5) without re-verifying
   the ASCO terminal documentation — terminals 14-16 are factory-use
   and writing to them may cause damage.
+- The software safety watchdog only protects you while the Pi is alive.
+  The ADAM host watchdog / DO fail-safe (§5.1) is what releases a
+  maintained relay if the Pi loses power or crashes — configure and
+  verify it before the switch is ever driven in anger.

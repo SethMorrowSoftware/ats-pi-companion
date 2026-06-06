@@ -38,6 +38,17 @@ io:
     port: 502
     unit_id: 1
 
+    # How the ADAM exposes its 6 digital inputs over Modbus:
+    #   coils           — FC01 read_coils  (current default)
+    #   discrete_inputs — FC02 read_discrete_inputs
+    # On the ADAM-6000 series the documented mapping for DIs is FC02; some
+    # firmware also mirrors them into the coil space (FC01). CONFIRM ON THE
+    # BENCH: if the live DI snapshot reads all-0 / position stays 'unknown'
+    # with the default, switch to discrete_inputs. atspi-bench --di-read and
+    # testadam.sh --di-read let you try both without editing config. The relay
+    # outputs are always coils (FC01 read-back / FC05 write).
+    di_read: coils
+
     # Input debounce: a level contact (on-normal, on-emergency, source-
     # available, engine-start) must read the same value on this many
     # consecutive 10 Hz samples before the change is published. 3 ≈ 300 ms —
