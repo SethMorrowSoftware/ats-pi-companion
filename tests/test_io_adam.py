@@ -61,6 +61,9 @@ class FakeClient:
         self.di_bits = [False] * 6
         self.do_bits = [False] * 6
         self.writes: list[tuple[int, bool]] = []
+        # (fn_name, address) of every bit read, so tests can assert which
+        # function code a DI read used (FC01 read_coils vs FC02 discrete inputs).
+        self.reads: list[tuple[str, int]] = []
 
     async def connect(self) -> bool:
         self.connected = True
@@ -69,17 +72,28 @@ class FakeClient:
     def close(self) -> None:
         self.connected = False
 
+    @staticmethod
+    def _pad_to_byte(bits):
+        # pymodbus rounds bits up to byte; replicate that quirk.
+        while len(bits) % 8 != 0:
+            bits.append(False)
+        return bits
+
     async def read_coils(self, address, count, slave):
+        self.reads.append(("read_coils", address))
         if address == DI_COIL_BASE:
             bits = list(self.di_bits[:count])
         elif address == DO_COIL_BASE:
             bits = list(self.do_bits[:count])
         else:
             bits = [False] * count
-        # pymodbus rounds bits up to byte; replicate that quirk
-        while len(bits) % 8 != 0:
-            bits.append(False)
-        return FakeResult(bits=bits)
+        return FakeResult(bits=self._pad_to_byte(bits))
+
+    async def read_discrete_inputs(self, address, count, slave):
+        # The ADAM exposes DIs in the discrete-input space; serve di_bits.
+        self.reads.append(("read_discrete_inputs", address))
+        bits = list(self.di_bits[:count]) if address == DI_COIL_BASE else [False] * count
+        return FakeResult(bits=self._pad_to_byte(bits))
 
     async def write_coil(self, address, value, slave):
         self.writes.append((address, value))
@@ -471,3 +485,50 @@ async def test_assumed_mode_defaults_to_auto(driver):
 def test_invalid_assumed_mode_raises():
     with pytest.raises(ValueError, match="assumed_mode"):
         IOAdamDriver(host="127.0.0.1", port=5020, assumed_mode="bogus")
+
+
+# ─── DI read function code (FC01 coils vs FC02 discrete inputs) ───────────────
+
+
+async def test_default_di_read_uses_read_coils(driver):
+    """Default keeps the historical FC01 (read_coils) DI read."""
+    fake = driver._client  # noqa: SLF001
+    await driver.read_inputs()
+    assert ("read_coils", DI_COIL_BASE) in fake.reads
+    assert ("read_discrete_inputs", DI_COIL_BASE) not in fake.reads
+
+
+async def test_di_read_discrete_inputs_uses_fc02():
+    """di_read='discrete_inputs' reads the DIs via FC02 (read_discrete_inputs),
+    not FC01 — the escape hatch for ADAM firmware that maps DIs to the
+    discrete-input space.
+    """
+    d = IOAdamDriver(host="127.0.0.1", port=5020, di_read="discrete_inputs")
+    fake = FakeClient()
+    d._client = fake  # noqa: SLF001
+    d._connected = True  # noqa: SLF001
+    fake.di_bits[DI_ON_EMERGENCY] = True
+    snap = await d.read_inputs()
+    # Decoding still works through the FC02 path.
+    assert snap.position == "generator"
+    assert ("read_discrete_inputs", DI_COIL_BASE) in fake.reads
+    assert ("read_coils", DI_COIL_BASE) not in fake.reads
+
+
+async def test_di_read_discrete_inputs_leaves_do_readback_on_coils():
+    """Switching the DI read to FC02 must NOT move the DO read-back off FC01 —
+    relays are always coils.
+    """
+    d = IOAdamDriver(host="127.0.0.1", port=5020, di_read="discrete_inputs")
+    fake = FakeClient()
+    d._client = fake  # noqa: SLF001
+    d._connected = True  # noqa: SLF001
+    fake.do_bits[DO_INHIBIT] = True
+    out = await d.read_output_state()
+    assert out.inhibit_active is True
+    assert ("read_coils", DO_COIL_BASE) in fake.reads
+
+
+def test_invalid_di_read_raises():
+    with pytest.raises(ValueError, match="di_read"):
+        IOAdamDriver(host="127.0.0.1", port=5020, di_read="bogus")

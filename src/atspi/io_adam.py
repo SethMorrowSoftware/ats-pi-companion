@@ -52,8 +52,21 @@ log = logging.getLogger("atspi.io_adam")
 
 
 # ADAM-6060 coil addresses (PDU offsets, 0-based).
-DI_COIL_BASE = 0x0000  # DI 0..5
+DI_COIL_BASE = 0x0000  # DI 0..5 (PDU base; function code per VALID_DI_READS)
 DO_COIL_BASE = 0x0010  # DO 0..5 (read-back and write)
+
+# How the ADAM exposes its 6 digital inputs over Modbus. On the ADAM-6000
+# series the canonical mapping reads the DIs as *discrete inputs* (FC02,
+# read_discrete_inputs); FC01 (read_coils) reads the *relay outputs*. Some
+# firmware also mirrors the DIs into the coil space at the same PDU base, so
+# read_coils may work too — it must be confirmed on the bench (see the
+# BENCH-VERIFY block above). This is an operator-settable config value
+# (io.adam.di_read) so a wrong guess is a one-line change at commissioning,
+# not a code edit + redeploy. If the DIs read all-0 / position stays
+# "unknown" with FC01, flip to "discrete_inputs". The DO side is always
+# coils (FC01 read-back / FC05 write).
+VALID_DI_READS = frozenset(["coils", "discrete_inputs"])
+_DI_READ_FN = {"coils": "read_coils", "discrete_inputs": "read_discrete_inputs"}
 
 # DI channel assignments per HARDWARE.md §3.
 DI_LOAD_DISCONNECT = 0
@@ -175,6 +188,7 @@ class IOAdamDriver:
         unit_id: int = 1,
         debounce_samples: int = DEFAULT_DEBOUNCE_SAMPLES,
         assumed_mode: str = "auto",
+        di_read: str = "coils",
     ):
         self.host = host
         self.port = port
@@ -185,6 +199,12 @@ class IOAdamDriver:
                 f"expected one of {sorted(VALID_ASSUMED_MODES)}"
             )
         self._assumed_mode = assumed_mode
+        if di_read not in VALID_DI_READS:
+            raise ValueError(
+                f"di_read={di_read!r} invalid; "
+                f"expected one of {sorted(VALID_DI_READS)}"
+            )
+        self._di_read = di_read
         self._client: AsyncModbusTcpClient | None = None
         self._connected = False
 
@@ -234,7 +254,7 @@ class IOAdamDriver:
         self._connected = False
 
     async def read_inputs(self) -> InputSnapshot:
-        raw = await self._read_coils(DI_COIL_BASE, 6)
+        raw = await self._read_di_bits(6)
         now_mono = time.monotonic()
 
         # Load Disconnect (DI 0) is a momentary pulse: latch it from the RAW
@@ -415,17 +435,34 @@ class IOAdamDriver:
         if not self._connected:
             raise ConnectionError(f"ADAM-6060 unreachable at {self.host}:{self.port}")
 
-    async def _read_coils(self, address: int, count: int) -> list[bool]:
+    async def _read_di_bits(self, count: int = 6) -> list[bool]:
+        """Read the digital inputs using the configured Modbus function code.
+
+        ``io.adam.di_read`` selects ``read_coils`` (FC01) or
+        ``read_discrete_inputs`` (FC02) — see VALID_DI_READS for why this is a
+        toggle. Both function codes use the same PDU base (``DI_COIL_BASE``);
+        Modbus keeps coils and discrete inputs in separate address spaces.
+        """
+        return await self._read_bits(_DI_READ_FN[self._di_read], DI_COIL_BASE, count)
+
+    async def _read_bits(self, fn_name: str, address: int, count: int) -> list[bool]:
+        """Read ``count`` bits via the named pymodbus reader (``read_coils`` or
+        ``read_discrete_inputs``), with implicit reconnect and error mapping.
+        """
         await self._ensure_connected()
+        reader = getattr(self._client, fn_name)
         try:
-            rr = await self._client.read_coils(address=address, count=count, slave=self.unit_id)
+            rr = await reader(address=address, count=count, slave=self.unit_id)
         except (TimeoutError, ModbusException, ConnectionError) as e:
             self._connected = False
-            raise OSError(f"ADAM read_coils({address}, {count}) failed: {e}") from e
+            raise OSError(f"ADAM {fn_name}({address}, {count}) failed: {e}") from e
         if rr.isError():
-            raise OSError(f"ADAM read_coils({address}, {count}) error: {rr}")
+            raise OSError(f"ADAM {fn_name}({address}, {count}) error: {rr}")
         # pymodbus returns more bits than requested (rounded to byte); trim.
         return list(rr.bits[:count])
+
+    async def _read_coils(self, address: int, count: int) -> list[bool]:
+        return await self._read_bits("read_coils", address, count)
 
     async def _write_coil(self, address: int, value: bool) -> None:
         await self._ensure_connected()

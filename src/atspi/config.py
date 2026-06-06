@@ -38,6 +38,11 @@ class AdamCfg:
     # Also gates command writes per ICD §6: 'auto' allows all, 'manual' allows
     # only inhibit, 'test'/'unknown' block all. One of: auto|manual|test|unknown.
     assumed_mode: str = "auto"
+    # Modbus function code used to read the 6 DIs: 'coils' (FC01) or
+    # 'discrete_inputs' (FC02). Confirm on the bench — see io_adam.VALID_DI_READS.
+    # Default keeps FC01 (current behaviour); flip to 'discrete_inputs' if the
+    # DIs read all-0 / position stays 'unknown'. One of: coils|discrete_inputs.
+    di_read: str = "coils"
 
 
 @dataclass

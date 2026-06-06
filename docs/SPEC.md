@@ -225,6 +225,16 @@ The exact algorithm:
 is not sufficient — the safety guarantee must hold against real wall
 time.
 
+**This watchdog only protects against host-alive comms loss.** It runs
+*inside* this service, so it cannot fire if the Pi itself dies (power
+loss, kernel panic, unplugged) while a maintained command is asserted —
+the ADAM would latch the relay forever. The hardware backstop for that
+case is the **ADAM-6060's own host-idle watchdog + DO safety values**,
+configured at commissioning (`docs/HARDWARE.md §5.1`) with all DOs
+de-energising on host loss. The two layers are complementary: this one
+handles "GenWatch silent, Pi alive" in 30 s; the ADAM watchdog handles
+"Pi dead" in 5–10 s.
+
 ---
 
 ## 6. State persistence
@@ -272,6 +282,7 @@ io:
     unit_id: 1
     debounce_samples: 3   # consecutive samples a level input must hold (1=off)
     assumed_mode: auto    # no Auto/Manual contact; also gates commands (ICD §6)
+    di_read: coils        # DI function code: coils (FC01) | discrete_inputs (FC02)
 
 site:
   unit_id: 23             # ats_pi_unit_id register (ICD §5.4)

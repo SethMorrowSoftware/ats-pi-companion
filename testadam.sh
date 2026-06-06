@@ -18,7 +18,7 @@ set -euo pipefail
 CONFIG_FILE="${CONFIG_FILE:-/etc/atspi/config.yaml}"
 VENV_DIR="${VENV_DIR:-/opt/atspi/venv}"
 
-HOST="" ; PORT="" ; UNIT_ID="" ; PASSTHRU=()
+HOST="" ; PORT="" ; UNIT_ID="" ; DI_READ="" ; PASSTHRU=()
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m  %s\n' "$*" >&2; }
@@ -28,10 +28,13 @@ usage() {
   cat <<'EOF'
 testadam.sh — bench-verify the ADAM-6060 before enabling the service.
 
-Usage: ./testadam.sh [--host IP] [--port N] [--unit-id N] [--skip-dis] [--skip-dos] [--json]
+Usage: ./testadam.sh [--host IP] [--port N] [--unit-id N] [--di-read coils|discrete_inputs] [--skip-dis] [--skip-dos] [--json]
 
   --host/--port/--unit-id   override the target (default: read /etc/atspi/config.yaml,
                             then 192.168.1.251:502 unit 1)
+  --di-read                 Modbus function code for the DIs: coils (FC01, default) or
+                            discrete_inputs (FC02). Default reads io.adam.di_read from
+                            config. If the DI snapshot is all-0, try discrete_inputs.
   --skip-dis                skip the digital-input checks (pass-through to atspi-bench)
   --skip-dos                skip driving relays — use when the ATS is energised and a
                             load flip is unsafe (pass-through to atspi-bench)
@@ -44,6 +47,7 @@ while [ $# -gt 0 ]; do
     --host)    HOST="${2:?--host needs a value}"; shift 2 ;;
     --port)    PORT="${2:?--port needs a value}"; shift 2 ;;
     --unit-id) UNIT_ID="${2:?--unit-id needs a value}"; shift 2 ;;
+    --di-read) DI_READ="${2:?--di-read needs a value}"; shift 2 ;;
     --skip-dis|--skip-dos|--json) PASSTHRU+=("$1"); shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; die "unknown argument: $1" ;;
@@ -89,8 +93,10 @@ PY
 [ -n "$PORT" ]    || PORT="502"
 [ -n "$UNIT_ID" ] || UNIT_ID="$(read_cfg io.adam.unit_id)"
 [ -n "$UNIT_ID" ] || UNIT_ID="1"
+[ -n "$DI_READ" ] || DI_READ="$(read_cfg io.adam.di_read)"
+[ -n "$DI_READ" ] || DI_READ="coils"
 
-say "Target ADAM-6060: $HOST:$PORT (unit $UNIT_ID)"
+say "Target ADAM-6060: $HOST:$PORT (unit $UNIT_ID, di_read=$DI_READ)"
 
 # ── 1. Ping ──────────────────────────────────────────────────────────────────
 say "1/3  ping ..."
@@ -102,12 +108,13 @@ fi
 
 # ── 2. Modbus reachability + live snapshot ───────────────────────────────────
 say "2/3  Modbus read (live DI + relay snapshot) ..."
-"$PY" - "$HOST" "$PORT" "$UNIT_ID" <<'PY' \
+"$PY" - "$HOST" "$PORT" "$UNIT_ID" "$DI_READ" <<'PY' \
   || die "Modbus read failed — ADAM unreachable or wrong host/port/unit. Fix this before bench-testing."
 import asyncio, sys
 from pymodbus.client import AsyncModbusTcpClient
 
 host, port, unit = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+di_read = sys.argv[4] if len(sys.argv) > 4 else "coils"
 DI = ["DI0  load-disconnect (transfer pulse)",
       "DI1  on-normal aux 14AA",
       "DI2  on-emergency aux 14BA",
@@ -122,11 +129,18 @@ async def main() -> int:
     if not await client.connect():
         print(f"     could not open a TCP connection to {host}:{port}")
         return 1
-    di = await client.read_coils(address=0x0000, count=6, slave=unit)
+    # DIs via the configured function code (FC02 discrete inputs, or FC01
+    # coils); relays are always coils. Mirrors io_adam.IOAdamDriver.
+    if di_read == "discrete_inputs":
+        di = await client.read_discrete_inputs(address=0x0000, count=6, slave=unit)
+    else:
+        di = await client.read_coils(address=0x0000, count=6, slave=unit)
     do = await client.read_coils(address=0x0010, count=6, slave=unit)
     client.close()
     if di.isError() or do.isError():
-        print(f"     Modbus error: DI={di} DO={do}")
+        print(f"     Modbus error (di_read={di_read}): DI={di} DO={do}")
+        print("     if DI errored, try the other di_read mode "
+              "(--di-read discrete_inputs / coils).")
         return 1
     print("     digital inputs:")
     for label, bit in zip(DI, list(di.bits)[:6]):
@@ -145,4 +159,4 @@ say "3/3  launching atspi-bench (interactive per-channel verification) ..."
 echo "     It walks each DI (actuate the contact) and each DO (confirm the ATS"
 echo "     terminal responds). Add --skip-dos if a load flip is unsafe right now."
 echo
-exec "$BENCH" --host "$HOST" --port "$PORT" --unit-id "$UNIT_ID" ${PASSTHRU[@]+"${PASSTHRU[@]}"}
+exec "$BENCH" --host "$HOST" --port "$PORT" --unit-id "$UNIT_ID" --di-read "$DI_READ" ${PASSTHRU[@]+"${PASSTHRU[@]}"}

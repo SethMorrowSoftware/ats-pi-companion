@@ -9,6 +9,44 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 ## [Unreleased]
 
+### Added (ADAM-arrival hardening)
+
+- **`io.adam.di_read` config (FC01 ↔ FC02 DI read).** The driver read the 6
+  digital inputs with `read_coils` (FC01); on the ADAM-6000 series the
+  *documented* DI mapping is `read_discrete_inputs` (FC02) — FC01 reads the
+  *relay outputs*. Whether a given unit/firmware also mirrors the DIs into the
+  coil space is firmware-dependent and can only be confirmed on the bench. The
+  DI function code is now an operator-settable value (`coils` |
+  `discrete_inputs`, default `coils` = unchanged behaviour), so a wrong guess
+  is a one-line config flip at commissioning instead of a code edit + redeploy.
+  Threaded through `atspi-bench --di-read` and `testadam.sh --di-read` so both
+  function codes can be tried interactively. Symptom of the wrong choice (all
+  DIs read 0 / `position` stuck `unknown`, no `INPUT_FAULT`) and the fix are in
+  HARDWARE.md §3, the §7 gotcha table, and RUNBOOK §2 step 5. The relay outputs
+  are unchanged — always coils (FC01 read-back / FC05 write).
+- **`docs/HARDWARE.md §5.1` — ADAM-6060 host watchdog / DO fail-safe.** The
+  software safety watchdog (ICD §8.3) only releases maintained commands while
+  the Pi is alive; it cannot fire if the Pi loses power or panics with Force
+  Transfer / Inhibit asserted, leaving the ADAM latching the relay forever.
+  Documented configuring the ADAM's own host-idle watchdog with per-DO safety
+  values (all DOs → OFF, 5–10 s timeout) as a required, verified commissioning
+  step — the hardware backstop for host death. Cross-referenced from SPEC §5,
+  RUNBOOK §5, and the §8 safety reminders.
+
+### Changed (commissioning robustness)
+
+- **`atspi-bench` never strands a maintained relay.** The Force-Transfer /
+  Inhibit verification asserted the relay, slept 2 s, then released — with no
+  `try/finally`, so a Ctrl-C or dropped SSH during the hold could leave the ATS
+  forced to the generator (or inhibited). The per-channel assert/hold/release
+  is now wrapped in `try/finally`, and `_run()` has a run-exit safety net that
+  drives Force Transfer + Inhibit OFF before closing the client (skipped when
+  `--skip-dos`). The ADAM host watchdog above is the hardware layer beneath this.
+- **`docs/HARDWARE.md §6` modpoll DI command fixed.** It told operators to read
+  the DIs with bare `modpoll` (which reads holding registers, FC03) and `-c 1`
+  (one register); corrected to `-t 1` (discrete inputs) / `-t 0` (coils) over
+  the 6-channel range, tied to `io.adam.di_read`.
+
 ### Added (commissioning tooling)
 
 - **`install.sh`** — one-shot Pi installer: creates the `atspi` service

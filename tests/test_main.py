@@ -131,6 +131,32 @@ def test_build_io_driver_rejects_invalid_assumed_mode():
         _build_io_driver(cfg)
 
 
+def test_build_io_driver_rejects_invalid_di_read():
+    """A typo'd io.adam.di_read must fail fast at startup, like assumed_mode."""
+    import pytest
+
+    from atspi.__main__ import _build_io_driver
+    from atspi.config import Config
+
+    cfg = Config()
+    cfg.io.driver = "adam"
+    cfg.io.adam.di_read = "bogus"
+    with pytest.raises(ValueError, match="di_read"):
+        _build_io_driver(cfg)
+
+
+def test_build_io_driver_passes_di_read_through():
+    """io.adam.di_read reaches the constructed ADAM driver."""
+    from atspi.__main__ import _build_io_driver
+    from atspi.config import Config
+
+    cfg = Config()
+    cfg.io.driver = "adam"
+    cfg.io.adam.di_read = "discrete_inputs"
+    driver = _build_io_driver(cfg)
+    assert driver._di_read == "discrete_inputs"  # noqa: SLF001
+
+
 def test_build_io_driver_mock_is_default():
     from atspi.__main__ import _build_io_driver
     from atspi.config import Config
