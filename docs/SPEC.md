@@ -235,6 +235,14 @@ de-energising on host loss. The two layers are complementary: this one
 handles "GenWatch silent, Pi alive" in 30 s; the ADAM watchdog handles
 "Pi dead" in 5–10 s.
 
+Because that hardware backstop is the single safety-critical item and is
+configured by hand, the driver **reads it back on connect and refuses to
+drive the switch unless it confirms the fail-safe is armed** (F1) —
+`io.adam.require_hw_watchdog`, default on; details in `docs/HARDWARE.md §5.2`.
+A failed/unverifiable check fails closed: outputs are refused (releases still
+allowed) and a persistent `OUTPUT_FAULT` is published so GenWatch's authority
+gate sees a non-authoritative link.
+
 ---
 
 ## 6. State persistence

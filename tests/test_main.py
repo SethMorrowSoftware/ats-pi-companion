@@ -165,6 +165,66 @@ def test_build_io_driver_mock_is_default():
     assert isinstance(_build_io_driver(Config()), IOMockDriver)
 
 
+# ─── F1: hardware fail-safe gate wiring ──────────────────────────────────────
+
+
+def test_build_io_driver_defaults_require_hw_watchdog_on():
+    """The production driver path defaults the F1 gate ON, and threads the
+    bench-verify register addresses from config to the driver.
+    """
+    from atspi.__main__ import _build_io_driver
+    from atspi.config import Config
+
+    cfg = Config()
+    cfg.io.driver = "adam"
+    cfg.io.adam.hw_watchdog.enable_register = 0x0100
+    cfg.io.adam.hw_watchdog.timeout_register = 0x0101
+    cfg.io.adam.hw_watchdog.safety_value_register_base = 0x0110
+    driver = _build_io_driver(cfg)
+    assert driver._require_hw_watchdog is True  # noqa: SLF001
+    assert driver._hw_watchdog.enable_register == 0x0100  # noqa: SLF001
+    # Fail closed until connect() verifies it.
+    assert driver.hw_watchdog_ok() is False
+
+
+async def test_sampling_loop_publishes_output_fault_when_hw_watchdog_unverified(monkeypatch):
+    """F1: while the hardware fail-safe is unverified the sampling loop must
+    keep OUTPUT_FAULT asserted so GenWatch sees a non-authoritative link.
+    """
+    from atspi import __main__ as main_mod
+    from atspi.io_driver import InputSnapshot, OutputState
+    from atspi.state import ADDR_FAULT_SUMMARY, FAULT_OUTPUT, RegisterStore
+
+    monkeypatch.setattr(main_mod, "SAMPLE_INTERVAL_S", 0.01)
+
+    class NotArmed:
+        async def read_inputs(self):
+            return InputSnapshot(
+                position="utility", normal_available=True, emergency_available=True,
+                engine_start_calling=False, ats_mode="auto", fault_bits=0,
+            )
+
+        async def read_output_state(self):
+            return OutputState(False, False, False, False)
+
+        def check_output_consistency(self, _actual):
+            return True
+
+        def hw_watchdog_ok(self):
+            return False
+
+    store = RegisterStore()
+    task = asyncio.create_task(main_mod._sampling_loop(NotArmed(), store))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert store.read_register(ADDR_FAULT_SUMMARY) & FAULT_OUTPUT, "OUTPUT_FAULT must be set"
+
+
 # ─── site.unit_id default warning ────────────────────────────────────────────
 
 
@@ -236,6 +296,9 @@ async def test_sampling_loop_throttles_repeated_failure_logs(caplog, monkeypatch
             return OutputState(False, False, False, False)
 
         def check_output_consistency(self, _actual):
+            return True
+
+        def hw_watchdog_ok(self):
             return True
 
     driver = Flaky()

@@ -26,6 +26,8 @@ from atspi.io_adam import (
     DO_FORCE_TRANSFER,
     DO_INHIBIT,
     DO_TEST,
+    HwWatchdogConfig,
+    HwWatchdogNotArmedError,
     IOAdamDriver,
 )
 
@@ -45,6 +47,7 @@ async def _wait_for(predicate: Callable[[], bool], timeout: float = 2.0) -> None
 @dataclass
 class FakeResult:
     bits: list[bool] = field(default_factory=list)
+    registers: list[int] = field(default_factory=list)
     is_err: bool = False
 
     def isError(self) -> bool:  # noqa: N802 (pymodbus interface)
@@ -64,6 +67,10 @@ class FakeClient:
         # (fn_name, address) of every bit read, so tests can assert which
         # function code a DI read used (FC01 read_coils vs FC02 discrete inputs).
         self.reads: list[tuple[str, int]] = []
+        # Holding registers for the F1 host-watchdog readback (addr -> value).
+        # Unset addresses read 0; set hr_raises to simulate a Modbus error.
+        self.holding_registers: dict[int, int] = {}
+        self.hr_raises: bool = False
 
     async def connect(self) -> bool:
         self.connected = True
@@ -71,6 +78,14 @@ class FakeClient:
 
     def close(self) -> None:
         self.connected = False
+
+    async def read_holding_registers(self, address, count, slave):
+        self.reads.append(("read_holding_registers", address))
+        if self.hr_raises:
+            from pymodbus.exceptions import ModbusIOException
+            raise ModbusIOException("simulated holding-register read failure")
+        regs = [self.holding_registers.get(address + i, 0) for i in range(count)]
+        return FakeResult(registers=regs)
 
     @staticmethod
     def _pad_to_byte(bits):
@@ -105,7 +120,10 @@ class FakeClient:
 
 @pytest.fixture
 def driver():
-    d = IOAdamDriver(host="127.0.0.1", port=5020, unit_id=1)
+    # These tests exercise the I/O decode/drive/pulse logic, not the F1
+    # hardware-fail-safe gate — waive it so drive_outputs isn't refused. The
+    # gate itself is covered by the dedicated tests further down.
+    d = IOAdamDriver(host="127.0.0.1", port=5020, unit_id=1, require_hw_watchdog=False)
     d._client = FakeClient()  # noqa: SLF001
     d._connected = True  # noqa: SLF001
     return d
@@ -532,3 +550,179 @@ async def test_di_read_discrete_inputs_leaves_do_readback_on_coils():
 def test_invalid_di_read_raises():
     with pytest.raises(ValueError, match="di_read"):
         IOAdamDriver(host="127.0.0.1", port=5020, di_read="bogus")
+
+
+# ─── F1: ADAM hardware host-watchdog fail-safe self-check ─────────────────────
+
+# Example BENCH-VERIFY register layout used by these tests. The real addresses
+# come from the ADAM-6000 User Manual (Appendix B) and are confirmed on the
+# unit; the driver logic is identical regardless of the actual numbers.
+_WD_ENABLE_REG = 0x0100
+_WD_TIMEOUT_REG = 0x0101
+_WD_SAFETY_BASE = 0x0110
+
+
+def _armed_config() -> HwWatchdogConfig:
+    return HwWatchdogConfig(
+        enable_register=_WD_ENABLE_REG,
+        enable_expected=1,
+        timeout_register=_WD_TIMEOUT_REG,
+        timeout_scale_s=0.1,
+        timeout_min_s=5.0,
+        timeout_max_s=10.0,
+        safety_value_register_base=_WD_SAFETY_BASE,
+        safety_value_count=6,
+    )
+
+
+def _armed_registers() -> dict[int, int]:
+    # Enabled, 7.0 s timeout (raw 70 × 0.1), all six DO safety values OFF.
+    return {_WD_ENABLE_REG: 1, _WD_TIMEOUT_REG: 70}
+
+
+_USE_ARMED_CONFIG = object()  # sentinel: distinct from None (= unconfigured)
+
+
+async def _connect_with_registers(
+    registers: dict[int, int],
+    *,
+    require: bool = True,
+    config: HwWatchdogConfig | None = _USE_ARMED_CONFIG,
+    hr_raises: bool = False,
+) -> IOAdamDriver:
+    if config is _USE_ARMED_CONFIG:
+        config = _armed_config()
+    d = IOAdamDriver(
+        host="127.0.0.1", port=5020,
+        require_hw_watchdog=require, hw_watchdog=config,
+    )
+    fake = FakeClient()
+    fake.holding_registers = dict(registers)
+    fake.hr_raises = hr_raises
+    d._client = fake  # noqa: SLF001
+    ok = await d.connect()
+    assert ok is True  # socket is up regardless of the watchdog verdict
+    return d
+
+
+async def test_hw_watchdog_armed_when_config_matches():
+    """A correctly-armed ADAM (watchdog enabled, timeout in band, all DO safety
+    values OFF) lets the driver arm and assert outputs.
+    """
+    d = await _connect_with_registers(_armed_registers())
+    assert d.hw_watchdog_ok() is True
+    ok, detail = d.hw_watchdog_status()
+    assert ok is True
+    assert "armed" in detail
+    # And an assert is now allowed through.
+    await d.drive_outputs(inhibit=True)
+    assert (DO_COIL_BASE + DO_INHIBIT, True) in d._client.writes  # noqa: SLF001
+
+
+async def test_hw_watchdog_disabled_refuses_assert():
+    """Watchdog disabled on the unit → not armed → asserting an output raises
+    and the status explains why (acceptance: a visible refusal, never silent arm).
+    """
+    regs = _armed_registers()
+    regs[_WD_ENABLE_REG] = 0  # disabled
+    d = await _connect_with_registers(regs)
+    assert d.hw_watchdog_ok() is False
+    _ok, detail = d.hw_watchdog_status()
+    assert "not enabled" in detail
+    with pytest.raises(HwWatchdogNotArmedError):
+        await d.drive_outputs(inhibit=True)
+    with pytest.raises(HwWatchdogNotArmedError):
+        await d.drive_outputs(force_transfer=True)
+    with pytest.raises(HwWatchdogNotArmedError):
+        await d.drive_outputs(test_pulse_ms=750)
+
+
+async def test_hw_watchdog_timeout_out_of_band_not_armed():
+    regs = _armed_registers()
+    regs[_WD_TIMEOUT_REG] = 200  # 20.0 s — longer than the software watchdog band
+    d = await _connect_with_registers(regs)
+    assert d.hw_watchdog_ok() is False
+    assert "timeout" in d.hw_watchdog_status()[1]
+
+
+async def test_hw_watchdog_nonzero_safety_value_not_armed():
+    """If any DO safety value is ON, the relays would NOT de-energise on host
+    loss — must refuse to arm.
+    """
+    regs = _armed_registers()
+    regs[_WD_SAFETY_BASE + DO_INHIBIT] = 1  # Inhibit would stay latched
+    d = await _connect_with_registers(regs)
+    assert d.hw_watchdog_ok() is False
+    assert "safety value" in d.hw_watchdog_status()[1]
+
+
+async def test_hw_watchdog_unconfigured_addresses_fail_closed():
+    """require_hw_watchdog=True but no register addresses configured → fail
+    closed with an actionable message, never a silent arm.
+    """
+    d = await _connect_with_registers({}, config=None)
+    assert d.hw_watchdog_ok() is False
+    assert "not configured" in d.hw_watchdog_status()[1]
+    with pytest.raises(HwWatchdogNotArmedError):
+        await d.drive_outputs(inhibit=True)
+
+
+async def test_hw_watchdog_read_error_fails_closed():
+    """A Modbus error reading the watchdog registers must fail closed, not
+    optimistically assume armed.
+    """
+    d = await _connect_with_registers(_armed_registers(), hr_raises=True)
+    assert d.hw_watchdog_ok() is False
+    assert "could not read" in d.hw_watchdog_status()[1]
+
+
+async def test_hw_watchdog_waiver_arms_without_reading():
+    """require_hw_watchdog=False (bench waiver) arms immediately and never reads
+    the watchdog registers.
+    """
+    d = await _connect_with_registers({}, require=False, config=None)
+    assert d.hw_watchdog_ok() is True
+    assert "waived" in d.hw_watchdog_status()[1]
+    # No holding-register read was attempted.
+    assert not any(fn == "read_holding_registers" for fn, _ in d._client.reads)  # noqa: SLF001
+    # And outputs may be asserted.
+    await d.drive_outputs(force_transfer=True)
+    assert (DO_COIL_BASE + DO_FORCE_TRANSFER, True) in d._client.writes  # noqa: SLF001
+
+
+async def test_hw_watchdog_release_allowed_while_not_armed():
+    """Even when not armed, a RELEASE (de-assert) must pass through — this is
+    what lets the comms-loss safety watchdog and bench cleanup drop relays.
+    """
+    regs = _armed_registers()
+    regs[_WD_ENABLE_REG] = 0  # not armed
+    d = await _connect_with_registers(regs)
+    assert d.hw_watchdog_ok() is False
+    # Releases do not raise.
+    await d.drive_outputs(inhibit=False, force_transfer=False)
+    assert (DO_COIL_BASE + DO_INHIBIT, False) in d._client.writes  # noqa: SLF001
+    assert (DO_COIL_BASE + DO_FORCE_TRANSFER, False) in d._client.writes  # noqa: SLF001
+
+
+async def test_hw_watchdog_unverified_until_connect():
+    """Before connect() runs the check, a required-but-unchecked driver is fail
+    closed (not armed).
+    """
+    d = IOAdamDriver(
+        host="127.0.0.1", port=5020,
+        require_hw_watchdog=True, hw_watchdog=_armed_config(),
+    )
+    assert d.hw_watchdog_ok() is False  # not yet verified
+
+
+async def test_hw_watchdog_rechecks_on_reconnect():
+    """The check re-runs on every (re)connect, so an ADAM that loses its config
+    (swap / factory reset) is caught when the link re-establishes.
+    """
+    d = await _connect_with_registers(_armed_registers())
+    assert d.hw_watchdog_ok() is True
+    # Simulate the unit coming back factory-reset (watchdog disabled) and the
+    # driver reconnecting.
+    d._client.holding_registers[_WD_ENABLE_REG] = 0  # noqa: SLF001
+    await d.connect()
+    assert d.hw_watchdog_ok() is False

@@ -70,7 +70,8 @@ def _build_io_driver(cfg) -> IODriver:
         return IOMockDriver()
     if driver_name == "adam":
         # Lazy import — pulls in pymodbus client, not needed for mock-only dev
-        from .io_adam import IOAdamDriver
+        from .io_adam import HwWatchdogConfig, IOAdamDriver
+        wd = cfg.io.adam.hw_watchdog
         return IOAdamDriver(
             host=cfg.io.adam.host,
             port=cfg.io.adam.port,
@@ -78,6 +79,17 @@ def _build_io_driver(cfg) -> IODriver:
             debounce_samples=cfg.io.adam.debounce_samples,
             assumed_mode=cfg.io.adam.assumed_mode,
             di_read=cfg.io.adam.di_read,
+            require_hw_watchdog=cfg.io.adam.require_hw_watchdog,
+            hw_watchdog=HwWatchdogConfig(
+                enable_register=wd.enable_register,
+                enable_expected=wd.enable_expected,
+                timeout_register=wd.timeout_register,
+                timeout_scale_s=wd.timeout_scale_s,
+                timeout_min_s=wd.timeout_min_s,
+                timeout_max_s=wd.timeout_max_s,
+                safety_value_register_base=wd.safety_value_register_base,
+                safety_value_count=wd.safety_value_count,
+            ),
         )
     raise ValueError(f"unknown io.driver: {driver_name!r}")
 
@@ -96,12 +108,16 @@ async def _sampling_loop(driver: IODriver, store: RegisterStore) -> None:
             store.apply_input_snapshot(inputs)
             store.apply_output_state(outputs)
             store.set_input_fault(False)
-            # Stuck-relay detection: compare actual driver state against
-            # the last commanded state. The driver enforces its own
-            # settling window so a write that hasn't physically actuated
-            # yet isn't flagged. OUTPUT_FAULT stays set until cleared by
-            # the next successful drive_outputs() in _dispatch_command.
-            if not driver.check_output_consistency(outputs):
+            # F1: an unverified hardware fail-safe (ADAM host-watchdog / DO
+            # safety values not confirmed armed) is a persistent OUTPUT_FAULT —
+            # re-asserted every cycle so GenWatch keeps seeing a non-authoritative
+            # ATS link and refuses to command. Checked first so it isn't masked
+            # by a transient clear from a release command in _dispatch_command.
+            # Stuck-relay detection: compare actual driver state against the last
+            # commanded state. The driver enforces its own settling window so a
+            # write that hasn't physically actuated yet isn't flagged. OUTPUT_FAULT
+            # stays set until cleared by the next successful drive_outputs().
+            if not driver.hw_watchdog_ok() or not driver.check_output_consistency(outputs):
                 store.set_output_fault(True)
             if consecutive_failures:
                 log.info(
@@ -161,9 +177,25 @@ async def _amain(args: argparse.Namespace) -> int:
     connected = await driver.connect()
     if not connected:
         log.error("I/O driver failed to connect; will keep retrying in sampling loop")
+    # F1: surface the hardware fail-safe self-check at startup. While it is not
+    # armed the driver refuses to assert outputs and the sampling loop publishes
+    # a persistent OUTPUT_FAULT (GenWatch then sees a non-authoritative link).
+    hw_ok, hw_detail = driver.hw_watchdog_status()
+    if not hw_ok:
+        log.error(
+            "ADAM hardware fail-safe NOT verified — %s. Outputs will be REFUSED "
+            "and a persistent OUTPUT_FAULT published until this is resolved. See "
+            "HARDWARE.md §5.1 (cable-pull test).",
+            hw_detail,
+        )
 
     state_file = StateFile(cfg.persistence.state_file)
     store = RegisterStore(unit_id=cfg.site.unit_id, state_file=state_file)
+    # F1: publish the OUTPUT_FAULT before the server accepts its first read, so
+    # a GenWatch poll in the gap before the first sampling tick can't briefly
+    # see an authoritative link. The sampling loop then keeps it asserted.
+    if not hw_ok:
+        store.set_output_fault(True)
     watchdog = SafetyWatchdog(store, driver)
 
     loop = asyncio.get_running_loop()

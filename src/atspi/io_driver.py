@@ -110,3 +110,21 @@ class IODriver(Protocol):
         return True unconditionally — there's nothing to verify.
         """
         ...
+
+    def hw_watchdog_ok(self) -> bool:
+        """Whether the hardware host-watchdog fail-safe is verified armed (F1).
+
+        For a real ADAM this reflects the connect-time readback of the host
+        watchdog / DO safety-value config; while it is False the driver refuses
+        to assert outputs and the sampling loop publishes a persistent
+        OUTPUT_FAULT (so GenWatch sees a non-authoritative link). Drivers with
+        no such fail-safe to verify (the mock) return True — nothing to gate.
+        """
+        ...
+
+    def hw_watchdog_status(self) -> tuple[bool, str]:
+        """``(hw_watchdog_ok, human_readable_detail)`` for startup logging and
+        health reporting. The detail explains *why* the fail-safe is (not)
+        considered armed.
+        """
+        ...
