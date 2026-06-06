@@ -36,6 +36,29 @@ SAMPLING_FAILURE_REMINDER_S = 30.0
 
 log = logging.getLogger("atspi")
 
+# The default site.unit_id — also the ADAM's factory-default address — is 1.
+# A real deployment assigns each ATS-Pi a distinct id that GenWatch pins via
+# its expected_unit_id check (ICD §5.4). Left at the default, register 0x0035
+# reports 1 and GenWatch refuses authority — which surfaces as a confusing
+# "authority refused" rather than an obvious misconfiguration.
+_DEFAULT_SITE_UNIT_ID = 1
+
+
+def _warn_if_default_unit_id(cfg) -> None:
+    """Warn at startup if site.unit_id was left at the default.
+
+    Non-fatal: a single bench/dev unit may legitimately run on 1, so this is
+    a loud warning rather than a hard failure.
+    """
+    if cfg.site.unit_id == _DEFAULT_SITE_UNIT_ID:
+        log.warning(
+            "site.unit_id is %d (the default); register 0x0035 will report %d. "
+            "GenWatch pins this via expected_unit_id (ICD §5.4) and will refuse "
+            "authority unless they match. Set site.unit_id in your config "
+            "(see config.example.yaml).",
+            _DEFAULT_SITE_UNIT_ID, _DEFAULT_SITE_UNIT_ID,
+        )
+
 
 def _build_io_driver(cfg) -> IODriver:
     """Construct the configured I/O driver. Defaults to mock when no
@@ -132,6 +155,7 @@ async def _amain(args: argparse.Namespace) -> int:
     )
     cfg = load_config(args.config)
     log.info("atspi v%s starting (unit_id=%d)", __version__, cfg.site.unit_id)
+    _warn_if_default_unit_id(cfg)
 
     driver = _build_io_driver(cfg)
     connected = await driver.connect()

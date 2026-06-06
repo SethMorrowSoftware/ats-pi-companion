@@ -165,6 +165,43 @@ def test_build_io_driver_mock_is_default():
     assert isinstance(_build_io_driver(Config()), IOMockDriver)
 
 
+# ─── site.unit_id default warning ────────────────────────────────────────────
+
+
+def test_warns_when_site_unit_id_left_at_default(caplog):
+    """Leaving site.unit_id at the default 1 collides with GenWatch's
+    expected_unit_id check (ICD §5.4); startup must warn loudly.
+    """
+    import logging as _logging
+
+    from atspi.__main__ import _warn_if_default_unit_id
+    from atspi.config import Config
+
+    cfg = Config()  # SiteCfg.unit_id defaults to 1
+    caplog.set_level(_logging.WARNING, logger="atspi")
+    _warn_if_default_unit_id(cfg)
+
+    warnings = [
+        r.getMessage() for r in caplog.records if r.levelno == _logging.WARNING
+    ]
+    assert any("site.unit_id" in m and "0x0035" in m for m in warnings), warnings
+
+
+def test_no_warning_when_site_unit_id_is_configured(caplog):
+    """A site that sets a real unit_id must not see the default-id warning."""
+    import logging as _logging
+
+    from atspi.__main__ import _warn_if_default_unit_id
+    from atspi.config import Config
+
+    cfg = Config()
+    cfg.site.unit_id = 23
+    caplog.set_level(_logging.WARNING, logger="atspi")
+    _warn_if_default_unit_id(cfg)
+
+    assert not any("site.unit_id" in r.getMessage() for r in caplog.records)
+
+
 # ─── Sampling-loop failure-log throttling ────────────────────────────────────
 
 
