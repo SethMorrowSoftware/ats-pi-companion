@@ -143,6 +143,20 @@ def test_guard_rejects_all_coil_writes():
     assert ctx.validate(0x0F, 0x0000, 4) is False         # FC15 = multi-coil
 
 
+def test_guard_rejects_fc23_read_write_multiple():
+    """FC23 (read/write multiple registers) is a write-capable function the
+    ATS-Pi does not define. pymodbus validates its read-range and write-range
+    under the same function code, so validate() can't gate the write-range on
+    its own — it's rejected wholesale (even at a command address) rather than
+    letting an FC23 write to read-only/reserved space fall through to the
+    bounds-only default validate().
+    """
+    ctx = _make_guarded()
+    assert ctx.validate(0x17, ADDR_CMD_INHIBIT, 1) is False  # command addr
+    assert ctx.validate(0x17, ADDR_POSITION, 1) is False     # read-only
+    assert ctx.validate(0x17, 0x0104, 1) is False            # reserved
+
+
 def test_guard_does_not_block_reads():
     ctx = _make_guarded()
     # FC03 = read holding registers
@@ -182,6 +196,57 @@ async def test_end_to_end_write_to_reserved_returns_exception(unused_tcp_port):
         # Write to a read-only register — also rejected.
         ro = await c.write_register(address=ADDR_POSITION, value=99, slave=1)
         assert ro.isError() is True
+
+        c.close()
+    finally:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+async def test_end_to_end_fc23_write_is_rejected(unused_tcp_port):
+    """A real FC23 (read/write multiple registers) request that writes a
+    read-only or reserved register must be rejected with a Modbus exception
+    rather than silently accepted (ICD §6.1). FC23 is a write path separate
+    from FC06/FC16, so it gets its own end-to-end guard.
+    """
+    from pymodbus.client import AsyncModbusTcpClient
+
+    # Modbus exception 0x02 (illegal data address). A literal rather than a
+    # pymodbus constant: validate()-driven rejections always map to 0x02, and
+    # the named constant moved in the 3.8 datastore API rework this repo pins
+    # below (see pyproject pymodbus<3.8).
+    exc_illegal_address = 0x02
+
+    store = RegisterStore(unit_id=23)
+    store.apply_input_snapshot(InputSnapshot(
+        position="utility", normal_available=True, emergency_available=True,
+        engine_start_calling=False, ats_mode="auto", fault_bits=0,
+    ))
+    task = await start_server(
+        host="127.0.0.1", port=unused_tcp_port, unit_id=1, store=store,
+    )
+    try:
+        c = AsyncModbusTcpClient(host="127.0.0.1", port=unused_tcp_port)
+        await c.connect()
+
+        # FC23 writing a read-only register (position) — rejected with 0x02.
+        ro = await c.readwrite_registers(
+            read_address=ADDR_POSITION, read_count=1,
+            write_address=ADDR_POSITION, values=[99], slave=1,
+        )
+        assert ro.isError() is True
+        assert ro.exception_code == exc_illegal_address
+
+        # FC23 writing a reserved register — also rejected.
+        res = await c.readwrite_registers(
+            read_address=ADDR_POSITION, read_count=1,
+            write_address=0x0104, values=[1], slave=1,
+        )
+        assert res.isError() is True
+        assert res.exception_code == exc_illegal_address
 
         c.close()
     finally:
