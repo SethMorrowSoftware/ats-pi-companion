@@ -9,6 +9,21 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 ## [Unreleased]
 
+### Fixed (ICD conformance)
+
+- **FC23 (read/write multiple registers) writes are now rejected.** The
+  `_GuardedSlaveContext.validate()` guard gated FC06/FC16 and coil writes but
+  not FC23 (`0x17`), which fell through to the bounds-only default `validate()`
+  — so an FC23 request that wrote a read-only or reserved address returned `OK`
+  instead of a Modbus exception, violating the ICD §6.1
+  reject-undefined-writes contract. (The write was still functionally dropped
+  by `RegisterStore.write_register`, so no relay was driven — only the wire
+  response was wrong.) FC23 is now rejected wholesale with exception 0x02, like
+  coil writes: pymodbus validates its read-range and write-range under the same
+  function code so the write-range can't be gated independently, and the ATS-Pi
+  doesn't define FC23 anyway (clients read via FC03/FC04, write via FC06/FC16).
+  Covered by a unit test and an end-to-end round-trip in `tests/test_server.py`.
+
 ### Added (ADAM-arrival hardening)
 
 - **`io.adam.di_read` config (FC01 ↔ FC02 DI read).** The driver read the 6
@@ -32,6 +47,14 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
   values (all DOs → OFF, 5–10 s timeout) as a required, verified commissioning
   step — the hardware backstop for host death. Cross-referenced from SPEC §5,
   RUNBOOK §5, and the §8 safety reminders.
+- **Startup warning when `site.unit_id` is left at the default `1`.** The
+  default `site.unit_id` is `1` (also the ADAM's factory-default address),
+  while `config.example.yaml` uses `23`. A deployment that omits the `site:`
+  block makes register `0x0035` report `1`; GenWatch pins this via its
+  `expected_unit_id` check (ICD §5.4) and refuses authority on a mismatch,
+  which surfaces as a confusing "authority refused" rather than an obvious
+  misconfiguration. Startup now logs a loud (non-fatal) warning — a single
+  bench/dev unit may legitimately run on `1`.
 
 ### Changed (commissioning robustness)
 

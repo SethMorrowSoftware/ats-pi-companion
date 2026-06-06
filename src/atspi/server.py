@@ -53,18 +53,30 @@ _ALLOWED_HOLDING_WRITE_ADDRESSES = frozenset([
 _HOLDING_WRITE_FCS = frozenset([0x06, 0x10])
 # FC05 (write single coil), FC15 (write multiple coils).
 _COIL_WRITE_FCS = frozenset([0x05, 0x0F])
+# FC23 (read/write multiple registers). It writes, but pymodbus validates its
+# read-range and write-range under this same function code, so validate()
+# cannot gate the write-range independently of the read-range. The ATS-Pi does
+# not define FC23 (clients read via FC03/FC04 and write via FC06/FC16 per the
+# ICD), so reject it wholesale — otherwise an FC23 write to a read-only or
+# reserved address falls through to the bounds-only default validate() and is
+# wrongly accepted, violating the ICD §6.1 reject-undefined-writes contract.
+_UNSUPPORTED_WRITE_FCS = frozenset([0x17])
 # FC03 (read holding regs), FC04 (read input regs); both serve the same
-# ICD register space. FC23 (read/write multiple) is not implemented.
+# ICD register space.
 _HOLDING_READ_FCS = frozenset([0x03, 0x04])
 
 
 class _GuardedSlaveContext(ModbusSlaveContext):
     """Slave context that refuses writes the ICD says must be rejected.
 
-    Three classes of rejection:
+    Four classes of rejection:
 
       * Coil writes (FC05/FC15) — the ATS-Pi exposes no coils; reject
         unconditionally regardless of address.
+      * FC23 (read/write multiple registers) — a write-capable function
+        code the ATS-Pi does not define; reject unconditionally (see
+        ``_UNSUPPORTED_WRITE_FCS`` for why the write-range can't be gated
+        on its own).
       * Holding writes (FC06/FC16) outside the four ICD command
         registers (``0x0100``–``0x0103``) — reserved space, read-only
         identification, and timestamp registers all live outside that
@@ -92,7 +104,7 @@ class _GuardedSlaveContext(ModbusSlaveContext):
         self._store = store
 
     def validate(self, fc_as_hex, address, count=1):  # noqa: N803 (pymodbus interface)
-        if fc_as_hex in _COIL_WRITE_FCS:
+        if fc_as_hex in _COIL_WRITE_FCS or fc_as_hex in _UNSUPPORTED_WRITE_FCS:
             return False
         if fc_as_hex in _HOLDING_WRITE_FCS:
             for offset in range(count):
