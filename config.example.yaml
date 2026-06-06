@@ -8,10 +8,17 @@
 # See README.md for setup and docs/SPEC.md for behaviour.
 
 # ─── Modbus TCP server (the interface GenWatch reads) ─────────────────────
-# Bind address and port for the inbound Modbus TCP server. Use 0.0.0.0
-# to listen on all interfaces; for site security prefer the specific
-# IP of the OT-VLAN interface. Port 502 is the standard Modbus TCP
-# port — use a high port (e.g. 5020) for dev to avoid root.
+# Bind address and port for the inbound Modbus TCP server. Port 502 is the
+# standard Modbus TCP port — use a high port (e.g. 5020) for dev to avoid root.
+#
+# SECURITY / F3: Modbus/TCP has NO authentication. Anything that can route to
+# this port can drive Test / Inhibit / Force-Transfer / Bypass within the
+# assumed_mode policy. For a CONTROL deployment the network boundary is a
+# SAFETY control, not just tidiness — make it a deliberate, documented choice:
+#   1. Bind `host` to the specific OT-VLAN interface IP (e.g. 192.168.1.250),
+#      NOT 0.0.0.0, so the server isn't reachable from other interfaces.
+#   2. Firewall-allowlist so ONLY the GenWatch Pi can reach <pi>:502.
+# See HARDWARE.md §4.1. (0.0.0.0 is the dev default; change it for the plant.)
 modbus_server:
   host: 0.0.0.0
   port: 502
@@ -67,6 +74,37 @@ io:
     # Set 'manual' to make the Pi observe-and-inhibit-only — GenWatch can never
     # force a transfer or start a test through it.
     assumed_mode: auto
+
+    # ── ADAM hardware fail-safe self-check (F1, safety-critical) ──────────────
+    # The ADAM's own host-idle watchdog + per-DO safety values are the ONLY
+    # thing that releases a latched Force-Transfer / Inhibit relay if the Pi
+    # itself dies (the software watchdog in safety.py dies with the process).
+    # It is configured by hand at commissioning (HARDWARE.md §5.1). With
+    # require_hw_watchdog: true (default) the driver reads that config back on
+    # connect and REFUSES to assert any output (and publishes a persistent
+    # OUTPUT_FAULT → GenWatch sees a non-authoritative link) unless it confirms:
+    # watchdog enabled, timeout in the 5–10 s band, every DO safety value OFF.
+    #
+    # Set require_hw_watchdog: false ONLY as an explicit, auditable waiver for
+    # bench work (atspi-bench already waives it internally).
+    require_hw_watchdog: true
+
+    # Register addresses for that readback. These are BENCH-VERIFY and left
+    # UNSET below: pull them from the ADAM-6000 Series User Manual (Appendix B,
+    # "Modbus/TCP addresses of ADAM-6000 modules") and CONFIRM ON THE UNIT —
+    # they vary by model/firmware, exactly like di_read above. While unset (and
+    # require_hw_watchdog: true) the check fails CLOSED, so commissioning can't
+    # proceed until they're filled in and the §5.1 cable-pull test passes.
+    # Addresses are PDU offsets (0-based), as used by read_holding_registers.
+    # hw_watchdog:
+    #   enable_register: 0x0000           # host-idle watchdog enable register
+    #   enable_expected: 1                # value that means "enabled"
+    #   timeout_register: 0x0000          # watchdog timeout register
+    #   timeout_scale_s: 0.1              # seconds per raw count (many fw: 0.1 s)
+    #   timeout_min_s: 5                  # armed band, matching HARDWARE.md §5.1
+    #   timeout_max_s: 10
+    #   safety_value_register_base: 0x0000  # first per-DO safety-value register
+    #   safety_value_count: 6             # DO 0..5 (all must read 0/OFF)
 
 # ─── Site identification ──────────────────────────────────────────────────
 # Reported via the ats_pi_unit_id register (ICD §5.4). GenWatch's

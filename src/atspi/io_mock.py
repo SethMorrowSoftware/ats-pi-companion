@@ -140,6 +140,15 @@ class IOMockDriver:
         # read-back path, so nothing to verify. Always consistent.
         return True
 
+    def hw_watchdog_ok(self) -> bool:
+        # The mock has no hardware host-watchdog fail-safe to verify, so there is
+        # nothing to gate (F1). Always "armed" — same posture as
+        # check_output_consistency.
+        return True
+
+    def hw_watchdog_status(self) -> tuple[bool, str]:
+        return True, "no hardware fail-safe to verify (mock driver)"
+
     async def drive_outputs(
         self,
         *,

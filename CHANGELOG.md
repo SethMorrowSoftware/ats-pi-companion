@@ -9,6 +9,62 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 ## [Unreleased]
 
+### Added (safety-critical — F1: ADAM hardware fail-safe now verified by software)
+
+- **The ADAM-6060 driver reads the host-watchdog / DO safety-value config back
+  on connect and refuses to drive the switch unless the hardware fail-safe is
+  armed.** The ADAM's host-idle watchdog + per-DO safety values are the only
+  thing that releases a latched Force-Transfer / Inhibit relay if the *Pi
+  itself* dies (the `safety.py` software watchdog shares fate with the
+  process). That backstop was configured by hand (`HARDWARE.md §5.1`) with
+  nothing confirming it stayed configured — skip the step, or factory-reset /
+  swap the ADAM, and the only safety net was silently gone.
+  - New `io.adam.require_hw_watchdog` (**default `true`**). On connect the
+    driver reads the watchdog-enable, watchdog-timeout, and per-DO
+    safety-value registers and treats the fail-safe as armed only if the
+    watchdog is enabled, the timeout is in the 5–10 s band, and every DO
+    safety value is `0`/OFF (matching `HARDWARE.md §5.1`).
+  - **Fails closed.** If the check fails — disabled, wrong timeout, a non-zero
+    safety value, registers unconfigured, or a read error — the driver refuses
+    to *assert* any output (`HwWatchdogNotArmedError`) while still allowing
+    *releases* (so the comms-loss watchdog and bench cleanup can drop relays),
+    and the sampling loop publishes a persistent `OUTPUT_FAULT` so GenWatch's
+    authority gate sees a non-authoritative link and refuses commands. The
+    reason is logged loudly at startup. Never a silent arm.
+  - The watchdog register addresses are **bench-verify config**
+    (`io.adam.hw_watchdog.*`, PDU offsets) sourced from the *ADAM-6000 Series
+    User Manual* (Appendix B) — the same discipline as `io.adam.di_read`. They
+    are left unset by default, so commissioning can't proceed until they're
+    filled in and the `§5.1` cable-pull test passes (the cable-pull, recorded
+    on the sign-off, remains the real acceptance gate — a wrong address can
+    read an armed-looking value). Documented in `HARDWARE.md §5.2`.
+  - `atspi-bench` waives the gate internally (`require_hw_watchdog=false`) since
+    it drives outputs on the bench under LOTO; that waiver is the only intended
+    use of `false`. Covered by new unit tests in `tests/test_io_adam.py` and a
+    sampling-loop fault test in `tests/test_main.py`.
+
+### Changed (deployment boundary — F3: Modbus command server segmentation)
+
+- **Documented the Modbus TCP server's network boundary as a safety control.**
+  Modbus/TCP has no authentication; the server whitelists the four command
+  registers and enforces mode policy, but anything that can route to port 502
+  can command within that policy. `config.example.yaml` and new `HARDWARE.md
+  §4.1` now frame OT-VLAN segmentation + a firewall allowlist (only `GenWatch
+  Pi → ats-pi:502`, `ats-pi → ADAM:502`) and binding `modbus_server.host` to
+  the OT-side interface (not `0.0.0.0`) as a deliberate, documented control,
+  with an `nmap`-filtered acceptance check. No transport auth is added (none
+  exists in Modbus/TCP); enforcement is delegated to the host firewall.
+
+### Added (release discipline — F4: commission a pinned build)
+
+- **`HARDWARE.md §9` — pin and tag the commissioned build.** The test suite
+  proves internal consistency against a simulation, not that the ADAM/ASCO
+  mappings are right for a specific unit. Documented cutting a tagged release
+  candidate (e.g. `v0.1.0-rc1`) at the commissioning commit, deploying only
+  that tag, commissioning it with the matching GenWatch tag, and recording the
+  tag + F1 cable-pull + watchdog-readback config + F3 `nmap` check on the
+  sign-off sheet.
+
 ### Fixed (ICD conformance)
 
 - **FC23 (read/write multiple registers) writes are now rejected.** The

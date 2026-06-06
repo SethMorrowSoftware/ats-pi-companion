@@ -92,8 +92,12 @@ def fake_driver(monkeypatch):
     fake = FakeClient()
 
     class _PatchedDriver(bench.IOAdamDriver):
-        def __init__(self, host, port=502, unit_id=1, di_read="coils"):
-            super().__init__(host=host, port=port, unit_id=unit_id, di_read=di_read)
+        def __init__(self, host, port=502, unit_id=1, di_read="coils",
+                     require_hw_watchdog=False, hw_watchdog=None):
+            super().__init__(
+                host=host, port=port, unit_id=unit_id, di_read=di_read,
+                require_hw_watchdog=require_hw_watchdog, hw_watchdog=hw_watchdog,
+            )
             self._client = fake  # noqa: SLF001
             self._connected = True  # noqa: SLF001
 
@@ -275,7 +279,8 @@ async def test_verify_do_releases_force_transfer_on_interrupt(monkeypatch):
     """
     from atspi.io_adam import DO_FORCE_TRANSFER, IOAdamDriver
 
-    driver = IOAdamDriver(host="127.0.0.1", port=5020)
+    # Bench-style direct use → waive the F1 gate (as bench._run does).
+    driver = IOAdamDriver(host="127.0.0.1", port=5020, require_hw_watchdog=False)
     fake = FakeClient()
     driver._client = fake  # noqa: SLF001
     driver._connected = True  # noqa: SLF001

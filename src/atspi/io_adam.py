@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 
 from pymodbus.client import AsyncModbusTcpClient
 from pymodbus.exceptions import ModbusException
@@ -132,6 +133,69 @@ DEFAULT_DEBOUNCE_SAMPLES = 3
 VALID_ASSUMED_MODES = frozenset(["auto", "manual", "test", "unknown"])
 
 
+class HwWatchdogNotArmedError(RuntimeError):
+    """Raised when a command would *assert* an ATS output but the ADAM's
+    hardware host-watchdog / DO safety-value fail-safe has not been verified
+    as armed (F1). Releases (de-asserting a relay) are always permitted, so the
+    comms-loss safety watchdog and the bench cleanup path can still drop relays.
+    """
+
+
+@dataclass(frozen=True)
+class HwWatchdogConfig:
+    """Where to read the ADAM-6000 host-watchdog / DO safety-value config and
+    what counts as "armed" (F1 self-check).
+
+    The ADAM's hardware host-idle watchdog is the *only* thing that releases a
+    latched Force-Transfer / Inhibit relay if the Pi itself dies (the software
+    watchdog in ``safety.py`` shares fate with the process). It is configured by
+    hand at commissioning (``docs/HARDWARE.md §5.1``); this struct lets the
+    driver read it back and refuse to arm outputs if it is not.
+
+    **Every address here is BENCH-VERIFY.** The ADAM-6000 Modbus map for the
+    watchdog/safety registers lives in the *ADAM-6000 Series User Manual*
+    (Appendix B, "Modbus/TCP addresses of ADAM-6000 modules") and varies by
+    model and firmware revision — the same discipline as the DI coil base and
+    the FC01/FC02 read toggle (``io.adam.di_read``). They are therefore left
+    *unset* (``None``) by default and supplied via ``io.adam.hw_watchdog`` so a
+    wrong value is a config edit at commissioning, not a code change + redeploy.
+
+    Addresses are PDU offsets (0-based), as passed to pymodbus
+    ``read_holding_registers``. A wrong/unconfigured address fails *closed*
+    (the check reports "not armed" → outputs refused) rather than silently
+    arming — but only the physical cable-pull test (``HARDWARE.md §5.1``)
+    proves the fail-safe actually drops the relay, so that test remains the
+    real acceptance gate.
+    """
+
+    # Host-idle / communication watchdog enable register, and the value that
+    # means "enabled" on this firmware.
+    enable_register: int | None = None
+    enable_expected: int = 1
+    # Watchdog timeout register. Stored raw on the wire; ``timeout_scale_s``
+    # converts a raw count to seconds (many ADAM revisions count in 0.1 s, i.e.
+    # scale 0.1 — BENCH-VERIFY by reading the register at a known timeout). The
+    # armed band matches HARDWARE.md §5.1 (5–10 s: longer than a sampling blip,
+    # shorter than the 30 s software watchdog).
+    timeout_register: int | None = None
+    timeout_scale_s: float = 0.1
+    timeout_min_s: float = 5.0
+    timeout_max_s: float = 10.0
+    # First per-DO safety-value register; ``safety_value_count`` consecutive
+    # registers are read (ADAM-6060: DO 0..5). Every one MUST be 0/OFF so the
+    # relays de-energise on host loss (HARDWARE.md §5.1).
+    safety_value_register_base: int | None = None
+    safety_value_count: int = 6
+
+    def is_configured(self) -> bool:
+        """All three register addresses supplied → the readback can run."""
+        return (
+            self.enable_register is not None
+            and self.timeout_register is not None
+            and self.safety_value_register_base is not None
+        )
+
+
 def _bit_pulse(timestamp_mono: float | None, hold_s: float, now_mono: float) -> bool:
     if timestamp_mono is None:
         return False
@@ -189,6 +253,8 @@ class IOAdamDriver:
         debounce_samples: int = DEFAULT_DEBOUNCE_SAMPLES,
         assumed_mode: str = "auto",
         di_read: str = "coils",
+        require_hw_watchdog: bool = True,
+        hw_watchdog: HwWatchdogConfig | None = None,
     ):
         self.host = host
         self.port = port
@@ -207,6 +273,21 @@ class IOAdamDriver:
         self._di_read = di_read
         self._client: AsyncModbusTcpClient | None = None
         self._connected = False
+
+        # F1 — hardware fail-safe self-check. Until connect() reads the ADAM's
+        # host-watchdog / DO safety-value config back and confirms it is armed,
+        # asserting an output is REFUSED (fail closed). Default-on so the only
+        # way to drive outputs without the backstop is an explicit, auditable
+        # waiver (require_hw_watchdog=False) for bench work. See _verify_hw_watchdog.
+        self._require_hw_watchdog = bool(require_hw_watchdog)
+        self._hw_watchdog = hw_watchdog
+        self._hw_watchdog_ok = not self._require_hw_watchdog
+        self._hw_watchdog_detail = (
+            "host-watchdog readback waived (require_hw_watchdog=false)"
+            if not self._require_hw_watchdog
+            else "host-watchdog not yet verified"
+        )
+        self._hw_watchdog_checked = False
 
         # Pulse-release scheduling (the ADAM has no notion of pulse;
         # we drive the relay high then schedule a low write).
@@ -242,6 +323,10 @@ class IOAdamDriver:
         self._connected = bool(ok)
         if self._connected:
             log.info("ADAM-6060 connected at %s:%d", self.host, self.port)
+            # F1: confirm the hardware fail-safe is armed before we are willing
+            # to drive any output. Runs on every (re)connect so an ADAM that is
+            # swapped or factory-reset mid-service is re-checked on reconnect.
+            await self._verify_hw_watchdog()
         return self._connected
 
     async def close(self) -> None:
@@ -310,6 +395,24 @@ class IOAdamDriver:
         force_transfer: bool | None = None,
         bypass_delay_pulse_ms: int | None = None,
     ) -> None:
+        # F1: never ASSERT an ATS output while the ADAM's hardware fail-safe is
+        # unverified — a Pi crash could otherwise strand the relay latched with
+        # nothing left to release it. A de-assert (inhibit/force_transfer=False)
+        # is always the safe direction, so it is allowed through even here: this
+        # is what lets the comms-loss safety watchdog and the bench cleanup path
+        # still drop relays. The orchestrator publishes the matching persistent
+        # OUTPUT_FAULT so GenWatch sees a non-authoritative link and refuses to
+        # command in the first place; this driver-level refusal is defence in depth.
+        if not self._hw_watchdog_ok and (
+            test_pulse_ms is not None
+            or bool(inhibit)
+            or bool(force_transfer)
+            or bypass_delay_pulse_ms is not None
+        ):
+            raise HwWatchdogNotArmedError(
+                "refusing to assert ATS outputs — ADAM host-watchdog fail-safe "
+                f"not verified: {self._hw_watchdog_detail}"
+            )
         if test_pulse_ms is not None:
             await self._pulse(DO_TEST, "test", test_pulse_ms)
         if inhibit is not None:
@@ -355,6 +458,107 @@ class IOAdamDriver:
                 )
                 return False
         return True
+
+    # ─── F1: hardware host-watchdog fail-safe self-check ──────────────
+
+    def hw_watchdog_ok(self) -> bool:
+        """True when the ADAM hardware host-watchdog / DO safety-value fail-safe
+        is verified armed (or the check is waived for bench work). While this is
+        False the driver refuses to assert outputs and the sampling loop raises a
+        persistent OUTPUT_FAULT so GenWatch sees a non-authoritative link (F1).
+        """
+        return self._hw_watchdog_ok
+
+    def hw_watchdog_status(self) -> tuple[bool, str]:
+        """``(ok, human_readable_detail)`` for startup logging / health."""
+        return self._hw_watchdog_ok, self._hw_watchdog_detail
+
+    async def _verify_hw_watchdog(self) -> None:
+        """Read the ADAM-6000 host-watchdog / DO safety-value config back and
+        decide whether the hardware fail-safe is armed (F1).
+
+        Armed requires, per ``HARDWARE.md §5.1``: the host watchdog enabled, its
+        timeout inside the 5–10 s band, and every DO safety value 0/OFF. Anything
+        else — including registers that aren't configured or can't be read — is
+        treated as *not armed* (fail closed). Called from ``connect()`` right
+        after the socket comes up, so it reads the client directly rather than
+        via ``_ensure_connected`` (which would recurse back into ``connect()``).
+        """
+        if not self._require_hw_watchdog:
+            self._set_hw_watchdog_status(
+                True, "host-watchdog readback waived (io.adam.require_hw_watchdog=false)"
+            )
+            return
+
+        cfg = self._hw_watchdog
+        if cfg is None or not cfg.is_configured():
+            self._set_hw_watchdog_status(
+                False,
+                "io.adam.hw_watchdog register addresses are not configured — set "
+                "them from the ADAM-6000 User Manual (Appendix B) and bench-verify "
+                "against the unit (HARDWARE.md §5.1), or set "
+                "io.adam.require_hw_watchdog=false for bench work",
+            )
+            return
+
+        try:
+            enable_raw = await self._read_holding_register(cfg.enable_register)
+            timeout_raw = await self._read_holding_register(cfg.timeout_register)
+            safety_raw = await self._read_holding_registers(
+                cfg.safety_value_register_base, cfg.safety_value_count
+            )
+        except OSError as e:
+            self._set_hw_watchdog_status(
+                False, f"could not read ADAM host-watchdog registers: {e}"
+            )
+            return
+
+        problems: list[str] = []
+        if enable_raw != cfg.enable_expected:
+            problems.append(
+                f"host watchdog not enabled (reg {cfg.enable_register:#06x}="
+                f"{enable_raw}, expected {cfg.enable_expected})"
+            )
+        timeout_s = timeout_raw * cfg.timeout_scale_s
+        if not (cfg.timeout_min_s <= timeout_s <= cfg.timeout_max_s):
+            problems.append(
+                f"watchdog timeout {timeout_s:g}s outside the "
+                f"[{cfg.timeout_min_s:g}, {cfg.timeout_max_s:g}]s band "
+                f"(reg {cfg.timeout_register:#06x} raw={timeout_raw})"
+            )
+        nonzero = [
+            (cfg.safety_value_register_base + i, v)
+            for i, v in enumerate(safety_raw)
+            if v != 0
+        ]
+        if nonzero:
+            problems.append(
+                "DO safety value(s) not OFF: "
+                + ", ".join(f"{addr:#06x}={v}" for addr, v in nonzero)
+            )
+
+        if problems:
+            self._set_hw_watchdog_status(False, "; ".join(problems))
+        else:
+            self._set_hw_watchdog_status(
+                True,
+                f"armed (timeout={timeout_s:g}s, all {cfg.safety_value_count} "
+                "DO safety values OFF)",
+            )
+
+    def _set_hw_watchdog_status(self, ok: bool, detail: str) -> None:
+        first = not self._hw_watchdog_checked
+        changed = ok != self._hw_watchdog_ok
+        self._hw_watchdog_ok = ok
+        self._hw_watchdog_detail = detail
+        self._hw_watchdog_checked = True
+        if not ok:
+            # Safety-critical: a non-armed fail-safe means a Pi crash could
+            # strand a latched relay. Log loudly on every check — (re)connects
+            # are infrequent, so this does not flood the journal.
+            log.error("ADAM host-watchdog fail-safe NOT verified — %s", detail)
+        elif first or changed:
+            log.info("ADAM host-watchdog fail-safe verified: %s", detail)
 
     # ─── Internal: pulse handling ─────────────────────────────────────
 
@@ -474,5 +678,29 @@ class IOAdamDriver:
         if wr.isError():
             raise OSError(f"ADAM write_coil({address}, {value}) error: {wr}")
 
+    async def _read_holding_registers(self, address: int, count: int) -> list[int]:
+        """FC03 read used by the host-watchdog self-check (F1).
 
-__all__ = ["IOAdamDriver"]
+        Talks to ``self._client`` directly rather than via ``_ensure_connected``:
+        the check runs from inside ``connect()`` right after the socket is up, so
+        going through ``_ensure_connected`` would recurse back into ``connect()``.
+        """
+        if self._client is None:
+            raise OSError("ADAM read_holding_registers: client not connected")
+        try:
+            rr = await self._client.read_holding_registers(
+                address=address, count=count, slave=self.unit_id
+            )
+        except (TimeoutError, ModbusException, ConnectionError) as e:
+            raise OSError(
+                f"ADAM read_holding_registers({address}, {count}) failed: {e}"
+            ) from e
+        if rr.isError():
+            raise OSError(f"ADAM read_holding_registers({address}, {count}) error: {rr}")
+        return list(rr.registers[:count])
+
+    async def _read_holding_register(self, address: int) -> int:
+        return (await self._read_holding_registers(address, 1))[0]
+
+
+__all__ = ["HwWatchdogConfig", "HwWatchdogNotArmedError", "IOAdamDriver"]

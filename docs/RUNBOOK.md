@@ -40,7 +40,7 @@ modpoll -m tcp -a 1 -r 6 -c 1 <ats-pi>     # PDU 0x0005 = fault_summary
 | Bit | Mask | Meaning | What to check |
 |---|---|---|---|
 | 0 | `0x01` | INPUT_FAULT | Last ADAM read failed, OR a Modbus write was rejected by mode policy (see §3) |
-| 1 | `0x02` | OUTPUT_FAULT | Last command write to ADAM failed, OR commanded-vs-readback mismatch (stuck relay) |
+| 1 | `0x02` | OUTPUT_FAULT | Last command write to ADAM failed, OR commanded-vs-readback mismatch (stuck relay), OR the F1 hardware fail-safe is unverified (see §4c) |
 | 2 | `0x04` | MODE_UNKNOWN | The driver reports `ats_mode=unknown` (only relevant once a mode-sensing contact is wired) |
 | 3 | `0x08` | CALIBRATION | Reserved |
 
@@ -179,7 +179,7 @@ valid command. ICD §6 mode policy:
 
 ## 4. "fault_summary shows OUTPUT_FAULT (bit 1)"
 
-Two distinct causes share this bit too:
+Three distinct causes share this bit:
 
 ### (a) `drive_outputs()` to the ADAM failed
 
@@ -214,6 +214,33 @@ This usually means:
 3. **ADAM firmware quirk** — some firmwares debounce DO read-back at
    200 ms; if `OUTPUT_SETTLING_S` in `io_adam.py` is too tight for your
    firmware, bump it.
+
+### (c) Hardware fail-safe unverified (F1) — commands also refused
+
+Look for, at startup or after a reconnect:
+
+```
+ADAM host-watchdog fail-safe NOT verified — <reason>
+ADAM hardware fail-safe NOT verified — ... Outputs will be REFUSED ...
+```
+
+and, if a command was attempted:
+
+```
+command dispatch failed (intent=...): refusing to assert ATS outputs —
+  ADAM host-watchdog fail-safe not verified: <reason>
+```
+
+→ The driver could not confirm the ADAM's host-watchdog / DO safety-value
+fail-safe is armed (`HARDWARE.md §5.1`, §5.2), so it is **refusing to assert
+outputs** and holding OUTPUT_FAULT until that's resolved. The `<reason>` says
+which: `not configured` (fill in `io.adam.hw_watchdog.*` register addresses
+from the ADAM-6000 manual and bench-verify), `not enabled` / `timeout … out of
+band` / `safety value(s) not OFF` (re-run the §5.1 watchdog setup in the
+Advantech utility), or `could not read …` (ADAM unreachable — diagnose like
+§2). De-asserts still work, so the safety watchdog can still drop relays. For
+intentional bench work without the fail-safe, set
+`io.adam.require_hw_watchdog: false`.
 
 ---
 

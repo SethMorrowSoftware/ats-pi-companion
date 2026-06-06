@@ -256,7 +256,14 @@ async def _run(
     print(f"target ADAM-6060: {host}:{port} unit_id={unit_id} di_read={di_read}",
           file=stream_out)
 
-    driver = IOAdamDriver(host=host, port=port, unit_id=unit_id, di_read=di_read)
+    # Bench verification drives outputs directly with the ATS under LOTO, so it
+    # is the one place the F1 hardware-fail-safe gate is explicitly waived (the
+    # auditable bench waiver). Production goes through __main__/_build_io_driver,
+    # which defaults require_hw_watchdog=True.
+    driver = IOAdamDriver(
+        host=host, port=port, unit_id=unit_id, di_read=di_read,
+        require_hw_watchdog=False,
+    )
     connected = await driver.connect()
     if not connected:
         print(f"FAIL: cannot reach ADAM at {host}:{port}", file=stream_out)

@@ -27,6 +27,27 @@ class ModbusServerCfg:
 
 
 @dataclass
+class HwWatchdogCfg:
+    """ADAM-6000 host-watchdog / DO safety-value readback config (F1).
+
+    Where to read the hardware fail-safe config back from and what counts as
+    "armed". Addresses are PDU offsets (0-based) and are BENCH-VERIFY: they
+    live in the ADAM-6000 User Manual (Appendix B) and vary by firmware, so
+    they default to unset (``null``) — with ``require_hw_watchdog: true`` an
+    unset/unverifiable check fails closed (outputs refused). See HARDWARE.md
+    §5.1 and io_adam.HwWatchdogConfig.
+    """
+    enable_register: int | None = None
+    enable_expected: int = 1
+    timeout_register: int | None = None
+    timeout_scale_s: float = 0.1
+    timeout_min_s: float = 5.0
+    timeout_max_s: float = 10.0
+    safety_value_register_base: int | None = None
+    safety_value_count: int = 6
+
+
+@dataclass
 class AdamCfg:
     host: str = "192.168.1.251"
     port: int = 502
@@ -43,6 +64,13 @@ class AdamCfg:
     # Default keeps FC01 (current behaviour); flip to 'discrete_inputs' if the
     # DIs read all-0 / position stays 'unknown'. One of: coils|discrete_inputs.
     di_read: str = "coils"
+    # F1 — require the ADAM hardware host-watchdog / DO safety-value fail-safe to
+    # be verified armed before the driver will assert any output. Default-on:
+    # this is the single safety-critical gate before driving a real switch. Set
+    # false ONLY as an explicit, auditable waiver for bench work. When true, the
+    # hw_watchdog register addresses below must be configured and bench-verified.
+    require_hw_watchdog: bool = True
+    hw_watchdog: HwWatchdogCfg = field(default_factory=HwWatchdogCfg)
 
 
 @dataclass
