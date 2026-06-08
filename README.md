@@ -124,6 +124,7 @@ docs/
   SPEC.md            implementation architecture
   HARDWARE.md        BOM, wiring, install, commissioning checklist
   BENCH.md           bare-module bench bring-up + validation (pre-ASCO)
+  NEXTSTEPS.md       staging verification (.NET config, GenWatch, gates)
   DEVELOPMENT.md     dev environment, mock controls, test layout
   RUNBOOK.md         field troubleshooting
 
