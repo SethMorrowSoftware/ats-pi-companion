@@ -377,6 +377,7 @@ commissioning sign-off** (`HARDWARE.md §9`); it is the F1 acceptance gate.
 - [ ] §10 FSV configured (Windows utility) **and cable-pull verified** —
       *deferred to commissioning; the bench proves everything else*
 
-Once §4–§9 pass, the unit is bench-validated. §10 (the hardware fail-safe)
-is completed at commissioning with the .NET Utility, then it's on to the
-ASCO wiring and production install in [`HARDWARE.md`](./HARDWARE.md).
+Once §4–§9 pass, the unit is bench-validated. Next is staging verification —
+the §10 hardware fail-safe via the .NET Utility, GenWatch end-to-end, and the
+acceptance gates — in [`NEXTSTEPS.md`](./NEXTSTEPS.md), then the ASCO wiring
+and production install in [`HARDWARE.md`](./HARDWARE.md).
