@@ -97,7 +97,9 @@ sudo systemctl enable --now atspi
 deliberately leaves the service stopped so you bench-verify the ADAM
 *before* the switch is ever driven. The literal step-by-step (and the
 five most likely first-boot gotchas) is in
-[`docs/HARDWARE.md §7`](./docs/HARDWARE.md). If something goes sideways
+[`docs/HARDWARE.md §7`](./docs/HARDWARE.md). To validate a bare
+ADAM-6060 on the bench first — before it is anywhere near the switch —
+work [`docs/BENCH.md`](./docs/BENCH.md). If something goes sideways
 at 2am, [`docs/RUNBOOK.md`](./docs/RUNBOOK.md) is the field guide.
 
 ## Project layout
@@ -121,6 +123,7 @@ src/atspi/
 docs/
   SPEC.md            implementation architecture
   HARDWARE.md        BOM, wiring, install, commissioning checklist
+  BENCH.md           bare-module bench bring-up + validation (pre-ASCO)
   DEVELOPMENT.md     dev environment, mock controls, test layout
   RUNBOOK.md         field troubleshooting
 
