@@ -426,6 +426,26 @@ class IOAdamDriver:
         if bypass_delay_pulse_ms is not None:
             await self._pulse(DO_BYPASS_DELAY, "bypass_delay", bypass_delay_pulse_ms)
 
+    async def release_all_outputs(self) -> None:
+        """Write OFF to all four ATS command DOs (test, force_transfer,
+        inhibit, bypass_delay), cancelling any pending pulse-release timers
+        first so a half-finished pulse can't re-assert behind our back.
+
+        Releases are always the safe direction, so this runs even while the
+        F1 hardware fail-safe is unverified (no ``HwWatchdogNotArmedError``).
+        Raises ``OSError`` on the first failed write; the caller retries.
+
+        The spare DOs (4, 5) are deliberately left untouched — this service
+        does not own them (HARDWARE.md §3).
+        """
+        for t in (self._test_release_task, self._bypass_release_task):
+            if t is not None and not t.done():
+                t.cancel()
+        for do_index in (DO_TEST, DO_FORCE_TRANSFER, DO_INHIBIT, DO_BYPASS_DELAY):
+            await self._write_coil(DO_COIL_BASE + do_index, False)
+            self._record_commanded(do_index, False)
+        log.info("ADAM: all ATS command outputs released (DO 0-3 OFF)")
+
     def _record_commanded(self, do_index: int, value: bool) -> None:
         """Note what we just drove onto ``do_index`` for stuck-relay detection."""
         self._commanded_do[do_index] = (value, time.monotonic())

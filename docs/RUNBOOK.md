@@ -267,6 +267,14 @@ did exactly what the contract requires.
 When GenWatch reconnects, the watchdog re-arms automatically; the next
 Modbus read clears the `released` flag.
 
+Related: a clean `systemctl stop` / `restart` also releases the command
+outputs on the way down, and every service start re-releases them before
+the first sample (ICD §9.3 reset-on-reboot) — so a restart never carries
+a latched relay across boots, even when it completes faster than the
+ADAM host-idle watchdog would have fired. Look for
+`startup: ATS command outputs reset to released` /
+`shutdown: ATS command outputs released` in the journal.
+
 This software watchdog only covers *"GenWatch silent, Pi alive."* If the
 **Pi itself** dies (power loss, panic) with a maintained command
 asserted, only the **ADAM-6060's own host watchdog / DO fail-safe**

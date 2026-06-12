@@ -6,6 +6,7 @@ scripted operator answers via a StringIO stdin.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 from dataclasses import dataclass, field
 
@@ -303,11 +304,11 @@ async def test_verify_do_releases_force_transfer_on_interrupt(monkeypatch):
     assert ft_writes[-1] is False, "last action on the coil must be release"
 
 
-async def test_bench_releases_maintained_outputs_on_exit(fake_driver):
-    """After a full DO run, the bench tool's _run() safety net leaves both
-    maintained relays (Force Transfer, Inhibit) de-energised.
+async def test_bench_releases_all_command_outputs_on_exit(fake_driver):
+    """After a full DO run, the bench tool's _run() safety net leaves all
+    four command relays (Test, Force Transfer, Inhibit, Bypass) de-energised.
     """
-    from atspi.io_adam import DO_FORCE_TRANSFER, DO_INHIBIT
+    from atspi.io_adam import DO_BYPASS_DELAY, DO_FORCE_TRANSFER, DO_INHIBIT, DO_TEST
 
     script = ["y", "y"] * 4  # drive + confirm each DO
     stream_in = _scripted_stdin(*script)
@@ -316,9 +317,41 @@ async def test_bench_releases_maintained_outputs_on_exit(fake_driver):
         "127.0.0.1", 5020, 1,
         skip_dis=True, stream_in=stream_in, stream_out=stream_out,
     )
-    for do in (DO_FORCE_TRANSFER, DO_INHIBIT):
+    for do in (DO_TEST, DO_FORCE_TRANSFER, DO_INHIBIT, DO_BYPASS_DELAY):
         last = [v for a, v in fake_driver.writes if a == DO_COIL_BASE + do][-1]
         assert last is False, f"DO{do} must be released by the time _run exits"
+
+
+async def test_bench_releases_pulsed_output_stranded_by_interrupt(fake_driver, monkeypatch):
+    """Ctrl-C while a Test pulse is mid-flight: the pulse-release timer dies
+    with the run, and a bench module typically has no FSV configured to clean
+    up after us — so the run-exit net must drive the pulsed coil OFF too.
+    """
+    from atspi.io_adam import DO_TEST
+
+    real_sleep = asyncio.sleep
+
+    async def interrupting_sleep(secs):
+        # The 0.3 s post-drive settle inside _verify_do — interrupt there,
+        # while the 1.5 s Test pulse is still asserted.
+        if secs == 0.3:
+            raise KeyboardInterrupt
+        await real_sleep(secs)
+
+    monkeypatch.setattr(bench.asyncio, "sleep", interrupting_sleep)
+
+    stream_in = _scripted_stdin("y")  # ready to drive DO 0 (Test)
+    stream_out = io.StringIO()
+    with pytest.raises(KeyboardInterrupt):
+        await bench._run(
+            "127.0.0.1", 5020, 1,
+            skip_dis=True, stream_in=stream_in, stream_out=stream_out,
+        )
+
+    test_writes = [v for a, v in fake_driver.writes if a == DO_COIL_BASE + DO_TEST]
+    assert test_writes and test_writes[-1] is False, (
+        "run-exit net must drop the stranded Test relay"
+    )
 
 
 async def test_bench_unreachable_adam_exits_2(monkeypatch):

@@ -101,8 +101,19 @@ async def _sampling_loop(driver: IODriver, store: RegisterStore) -> None:
     log.info("sampling loop starting at 10 Hz")
     consecutive_failures = 0
     last_failure_log_mono = 0.0
+    outputs_reset = False
     while True:
         try:
+            # ICD §9.3: command outputs MUST start released after a service
+            # (re)start. A fast restart can beat the ADAM's host-idle
+            # watchdog, so a relay latched by the previous instance (or by a
+            # stray bench write) would otherwise survive into this one with
+            # nothing left to release it. One-shot, but retried every cycle
+            # until the write lands (e.g. ADAM unreachable at boot).
+            if not outputs_reset:
+                await driver.release_all_outputs()
+                outputs_reset = True
+                log.info("startup: ATS command outputs reset to released (ICD §9.3)")
             inputs = await driver.read_inputs()
             outputs = await driver.read_output_state()
             store.apply_input_snapshot(inputs)
@@ -262,6 +273,19 @@ async def _amain(args: argparse.Namespace) -> int:
             await t
         except (asyncio.CancelledError, Exception):
             pass
+    # Release the command outputs on the way out (same ICD §9.3 posture as
+    # the startup reset): a stopped service must not leave a relay latched.
+    # With the ADAM hardware fail-safe armed this merely beats the 5-10 s
+    # host-idle release; on a bench module without it, it's the only release.
+    try:
+        await asyncio.wait_for(driver.release_all_outputs(), timeout=5.0)
+        log.info("shutdown: ATS command outputs released")
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "shutdown: could not release ATS command outputs (%s) — the ADAM "
+            "host-watchdog fail-safe (HARDWARE.md §5.1) is the remaining backstop",
+            e,
+        )
     await driver.close()
     # Non-zero exit code on critical-task failure so systemd's Restart=on-failure
     # kicks in immediately rather than waiting for the WatchdogSec timeout.

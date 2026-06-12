@@ -392,6 +392,34 @@ async def test_writes_to_non_command_addresses_are_rejected(server, addr):
     assert r.isError(), f"write to {addr:#06x} succeeded; ICD requires rejection"
 
 
+async def test_invalid_value_writes_are_acknowledged_and_ignored(server):
+    """ICD §6: a write whose VALUE doesn't match a defined pattern MUST
+    return Modbus exception 0x03. pymodbus 3.7's ``validate()`` hook sees
+    only (function code, address, count) — never the value — so the server
+    cannot emit that exception: the write is acknowledged on the wire and
+    then dropped (no CommandIntent, no relay action, no read-back change).
+    Known deviation #3 in CHANGELOG; this test pins the actual behaviour so
+    an accidental change is caught. The safety property that matters — an
+    out-of-pattern value never reaches a relay — is asserted here too.
+    """
+    client, _store = server
+    # Maintained command with a bogus value.
+    r1 = await client.write_register(address=ADDR_CMD_INHIBIT, value=5, slave=1)
+    assert not r1.isError()  # deviation: ICD prefers exception 0x03
+    # Pulsed command with the one value its pattern does NOT define.
+    r2 = await client.write_register(address=ADDR_CMD_TEST, value=0, slave=1)
+    assert not r2.isError()
+    # Neither write may reach the driver: read-backs stay released well past
+    # the 500 ms read-back-reflection window.
+    await asyncio.sleep(0.6)
+    rb_inhibit = await client.read_holding_registers(
+        address=ADDR_CMD_INHIBIT_RB, count=1, slave=1)
+    rb_test = await client.read_holding_registers(
+        address=ADDR_CMD_TEST_RB, count=1, slave=1)
+    assert rb_inhibit.registers == [0], "invalid value must not assert the relay"
+    assert rb_test.registers == [0], "cmd_test=0 is undefined and must not pulse"
+
+
 # ─── §2.1: command register write contract ───────────────────────────────
 
 

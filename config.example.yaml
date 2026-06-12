@@ -87,6 +87,13 @@ io:
     #
     # Set require_hw_watchdog: false ONLY as an explicit, auditable waiver for
     # bench work (atspi-bench already waives it internally).
+    #
+    # ADAM-6060 NOTE: bench validation found the 6060 does NOT expose its
+    # FSV/watchdog config over Modbus (BENCH.md §10 finding 4), so this
+    # readback can never pass on that model. For the 6060, set
+    # require_hw_watchdog: false and treat the §5.1 cable-pull test as the F1
+    # gate (NEXTSTEPS.md Stage 2) — and re-run that test after any ADAM swap
+    # or factory reset, because nothing in software will warn you.
     require_hw_watchdog: true
 
     # Register addresses for that readback. These are BENCH-VERIFY and left

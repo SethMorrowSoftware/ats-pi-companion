@@ -207,6 +207,9 @@ async def test_sampling_loop_publishes_output_fault_when_hw_watchdog_unverified(
         async def read_output_state(self):
             return OutputState(False, False, False, False)
 
+        async def release_all_outputs(self):
+            pass
+
         def check_output_consistency(self, _actual):
             return True
 
@@ -262,6 +265,80 @@ def test_no_warning_when_site_unit_id_is_configured(caplog):
     assert not any("site.unit_id" in r.getMessage() for r in caplog.records)
 
 
+# ─── ICD §9.3: reset-on-reboot output release ────────────────────────────────
+
+
+async def test_sampling_loop_releases_outputs_at_startup(monkeypatch):
+    """ICD §9.3: command outputs must be reset to released before the loop
+    publishes anything. A relay latched by a previous service instance (a
+    restart fast enough to beat the ADAM's host-idle watchdog) must not
+    survive into this one.
+    """
+    from atspi import __main__ as main_mod
+    from atspi.io_mock import IOMockDriver
+    from atspi.state import ADDR_CMD_FORCE_TRANSFER_RB, ADDR_CMD_INHIBIT_RB, RegisterStore
+
+    monkeypatch.setattr(main_mod, "SAMPLE_INTERVAL_S", 0.01)
+    driver = IOMockDriver()
+    await driver.connect()
+    # Simulate relays left latched by a previous service instance.
+    await driver.drive_outputs(inhibit=True, force_transfer=True)
+
+    store = RegisterStore()
+    task = asyncio.create_task(main_mod._sampling_loop(driver, store))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    out = await driver.read_output_state()
+    assert out.inhibit_active is False, "stale inhibit must be released at startup"
+    assert out.force_transfer_active is False
+    assert store.read_register(ADDR_CMD_INHIBIT_RB) == 0
+    assert store.read_register(ADDR_CMD_FORCE_TRANSFER_RB) == 0
+
+
+async def test_sampling_loop_retries_startup_release_until_it_lands(monkeypatch):
+    """An ADAM unreachable at boot must not skip the §9.3 reset — the loop
+    retries the release each cycle (publishing INPUT_FAULT meanwhile) and
+    only marks it done once the write lands.
+    """
+    from atspi import __main__ as main_mod
+    from atspi.io_mock import IOMockDriver
+    from atspi.state import RegisterStore
+
+    monkeypatch.setattr(main_mod, "SAMPLE_INTERVAL_S", 0.01)
+
+    class FlakyRelease(IOMockDriver):
+        release_calls = 0
+        fail_first = 3
+
+        async def release_all_outputs(self):
+            self.release_calls += 1
+            if self.release_calls <= self.fail_first:
+                raise OSError("ADAM unreachable")
+            await super().release_all_outputs()
+
+    driver = FlakyRelease()
+    await driver.connect()
+    await driver.drive_outputs(inhibit=True)
+
+    store = RegisterStore()
+    task = asyncio.create_task(main_mod._sampling_loop(driver, store))
+    await asyncio.sleep(0.15)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert driver.release_calls >= driver.fail_first + 1, "release must be retried"
+    out = await driver.read_output_state()
+    assert out.inhibit_active is False, "release must eventually land"
+
+
 # ─── Sampling-loop failure-log throttling ────────────────────────────────────
 
 
@@ -294,6 +371,9 @@ async def test_sampling_loop_throttles_repeated_failure_logs(caplog, monkeypatch
 
         async def read_output_state(self):
             return OutputState(False, False, False, False)
+
+        async def release_all_outputs(self):
+            pass
 
         def check_output_consistency(self, _actual):
             return True

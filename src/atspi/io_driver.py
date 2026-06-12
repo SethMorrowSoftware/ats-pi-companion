@@ -96,6 +96,25 @@ class IODriver(Protocol):
         """
         ...
 
+    async def release_all_outputs(self) -> None:
+        """Drive every ATS command output to its released (OFF) state —
+        the maintained pair (inhibit, force_transfer) AND the pulsed pair
+        (test, bypass_delay) — cancelling any in-flight pulse timers.
+
+        Called by the orchestrator at service startup (ICD §9.3: command
+        registers MUST start in the no-commands-asserted state after a
+        reboot, even if a previous instance died with a relay latched and
+        the restart was fast enough to beat the ADAM's host-idle watchdog),
+        at graceful shutdown (so a ``systemctl stop``/``restart`` doesn't
+        leave a relay latched), and by the bench cleanup path.
+
+        This is a release, so it MUST be permitted even while the F1
+        hardware fail-safe is unverified — same rule as ``drive_outputs``
+        with ``False`` values. Raises on I/O failure; callers retry or
+        fall back to the ADAM hardware watchdog.
+        """
+        ...
+
     def check_output_consistency(self, actual: OutputState) -> bool:
         """Compare the just-read driver state to what we last commanded.
 

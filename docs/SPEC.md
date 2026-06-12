@@ -254,6 +254,18 @@ Per ICD §9.3:
 - **MUST reset on reboot:** `ats_pi_uptime_s` (per definition), all
   command registers (start in "no commands asserted" state per §9.3).
 
+  The command reset is enforced *actively*, not just in the store: the
+  sampling loop's first action is `driver.release_all_outputs()` — all
+  four command DOs driven OFF, retried each cycle until the write lands.
+  Without that, a service restart fast enough to beat the ADAM's
+  host-idle watchdog (a `systemctl restart` completes in ~2 s; the
+  watchdog needs 5–10 s of silence) would carry a relay latched by the
+  previous instance into the new boot with nothing left to release it.
+  The same release runs once more on graceful shutdown, so a stopped
+  service never leaves a relay latched waiting for the hardware
+  fail-safe (or latched indefinitely where that fail-safe isn't
+  configured, e.g. mid-bench).
+
 Implementation: JSON file at `/var/lib/atspi/state.json` written on
 each transition. Atomic-rename + parent-directory fsync so a power
 loss either keeps the old file or shows the new one in full, never

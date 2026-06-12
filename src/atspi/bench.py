@@ -290,16 +290,20 @@ async def _run(
                 results.append(r)
                 print(f"  result: {r.outcome.upper()}: {r.detail}", file=stream_out)
     finally:
-        # Safety net: never leave a maintained relay (Force Transfer / Inhibit)
-        # asserted on the way out — including on Ctrl-C or an exception mid-test.
-        # _verify_do also releases per-channel; this is the belt-and-suspenders
-        # backstop (and the ADAM host watchdog is the hardware layer below it).
-        # Only meaningful when we actually drove outputs this run.
+        # Safety net: never leave ANY command relay asserted on the way out —
+        # including on Ctrl-C or an exception mid-test. That covers both the
+        # maintained pair (Force Transfer / Inhibit) and a pulsed Test/Bypass
+        # interrupted mid-pulse: the pulse-release timer dies with this
+        # process, and a bench module typically has no FSV configured yet, so
+        # nothing else would drop the relay. _verify_do also releases
+        # per-channel; this is the belt-and-suspenders backstop (and the ADAM
+        # host watchdog is the hardware layer below it). Only meaningful when
+        # we actually drove outputs this run.
         if not skip_dos:
             try:
-                await driver.drive_outputs(force_transfer=False, inhibit=False)
+                await driver.release_all_outputs()
             except Exception as e:  # noqa: BLE001
-                print(f"WARNING: failed to release maintained outputs on exit: {e}",
+                print(f"WARNING: failed to release command outputs on exit: {e}",
                       file=stream_out)
         await driver.close()
 

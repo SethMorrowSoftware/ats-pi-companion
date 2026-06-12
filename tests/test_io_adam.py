@@ -257,6 +257,53 @@ async def test_read_output_state_decodes_bits(driver):
     assert out.bypass_delay_active is False
 
 
+# ─── release_all_outputs (ICD §9.3 reset + shutdown/bench cleanup) ────────
+
+
+async def test_release_all_outputs_writes_all_four_command_dos_off(driver):
+    fake = driver._client  # noqa: SLF001
+    fake.do_bits[DO_INHIBIT] = True
+    fake.do_bits[DO_FORCE_TRANSFER] = True
+    await driver.release_all_outputs()
+    for do in (DO_TEST, DO_FORCE_TRANSFER, DO_INHIBIT, DO_BYPASS_DELAY):
+        assert (DO_COIL_BASE + do, False) in fake.writes, f"DO{do} must be driven OFF"
+    # Spares are not ours to touch (HARDWARE.md §3).
+    assert not any(addr in (DO_COIL_BASE + 4, DO_COIL_BASE + 5) for addr, _ in fake.writes)
+    # Recorded as commanded-OFF so stuck-relay detection covers a relay that
+    # fails to drop.
+    for do in (DO_TEST, DO_FORCE_TRANSFER, DO_INHIBIT, DO_BYPASS_DELAY):
+        assert driver._commanded_do[do][0] is False  # noqa: SLF001
+
+
+async def test_release_all_outputs_cancels_inflight_pulse(driver):
+    """A pulse mid-flight must not re-assert (or double-release) behind the
+    all-off write — its release timer is cancelled first.
+    """
+    fake = driver._client  # noqa: SLF001
+    await driver.drive_outputs(test_pulse_ms=1500)
+    assert (DO_COIL_BASE + DO_TEST, True) in fake.writes
+    await driver.release_all_outputs()
+    task = driver._test_release_task  # noqa: SLF001
+    await asyncio.sleep(0)  # let the cancellation propagate
+    assert task.cancelled() or task.done()
+    assert (DO_COIL_BASE + DO_TEST, False) in fake.writes
+    # The pulse slot is reusable afterwards.
+    await driver.drive_outputs(test_pulse_ms=500)
+    assert fake.writes.count((DO_COIL_BASE + DO_TEST, True)) == 2
+
+
+async def test_release_all_outputs_allowed_while_hw_watchdog_unverified():
+    """F1: releases must never be blocked by an unverified hardware
+    fail-safe — this is what lets the startup/shutdown reset run.
+    """
+    d = IOAdamDriver(host="127.0.0.1", port=5020, unit_id=1, require_hw_watchdog=True)
+    d._client = FakeClient()  # noqa: SLF001
+    d._connected = True  # noqa: SLF001
+    assert d.hw_watchdog_ok() is False
+    await d.release_all_outputs()  # must not raise HwWatchdogNotArmedError
+    assert (DO_COIL_BASE + DO_INHIBIT, False) in d._client.writes  # noqa: SLF001
+
+
 # ─── Stuck-relay detection ───────────────────────────────────────────────
 
 
