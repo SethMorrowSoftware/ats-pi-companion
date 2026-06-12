@@ -144,3 +144,18 @@ async def test_mock_pulse_re_trigger_during_active_is_ignored():
         "not be extended by the second drive_outputs call"
     )
     await d.close()
+
+
+async def test_mock_release_all_outputs_clears_everything():
+    """release_all_outputs (ICD §9.3 reset / shutdown cleanup) drops the
+    maintained pair AND an in-flight pulse on the mock driver."""
+    d = IOMockDriver()
+    await d.connect()
+    await d.drive_outputs(inhibit=True, force_transfer=True, test_pulse_ms=1500)
+    await d.release_all_outputs()
+    out = await d.read_output_state()
+    assert out.test_active is False
+    assert out.inhibit_active is False
+    assert out.force_transfer_active is False
+    assert out.bypass_delay_active is False
+    await d.close()

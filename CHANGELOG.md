@@ -9,6 +9,50 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 ## [Unreleased]
 
+### Added (safety-critical — ICD §9.3 reset-on-reboot now actively enforced)
+
+- **All four command outputs are driven OFF at service startup and on
+  graceful shutdown** (`IODriver.release_all_outputs`). ICD §9.3 requires
+  command registers to start in the no-commands-asserted state after a
+  reboot, but only the in-memory store reset implemented that — the
+  *physical relay* kept whatever the previous instance last wrote. A
+  `systemctl restart` completes in ~2 s, faster than the ADAM host-idle
+  watchdog's 5–10 s window, so a maintained Inhibit / Force-Transfer relay
+  (or a Test/Bypass pulse whose release timer died with the old process)
+  latched by the previous instance would survive into the new boot with
+  nothing left to release it: the new instance's read-back honestly showed
+  it asserted, the comms-loss watchdog saw healthy GenWatch polling and
+  never fired, and the hardware fail-safe never saw host silence. Now:
+  - The sampling loop's first action is `release_all_outputs()` (Test,
+    Force-Transfer, Inhibit, Bypass → OFF; spares untouched), retried every
+    cycle until the write lands (e.g. ADAM unreachable at boot), before any
+    input state is published.
+  - The same release runs on graceful shutdown (SIGTERM / `systemctl
+    stop`), bounded by a 5 s timeout, so an orderly stop doesn't leave a
+    relay latched for the hardware watchdog to clean up — or latched
+    indefinitely where that fail-safe isn't configured.
+  - Releases are exempt from the F1 hardware-fail-safe gate (same rule as
+    the comms-loss watchdog), so the reset also runs while the gate is
+    failing closed.
+  - `atspi-bench`'s run-exit safety net now uses the same call, fixing a
+    real gap: a Ctrl-C during a Test/Bypass *pulse* cancelled the pulse's
+    release timer on close, stranding the Test relay energised — on a bench
+    module with no FSV configured, indefinitely. (The previous net released
+    only the two maintained relays.)
+  - Covered by new tests in `test_io_adam.py`, `test_main.py`,
+    `test_bench.py`, and `test_smoke.py`.
+
+### Changed (docs — ADAM-6060 F1 readback reality)
+
+- **`HARDWARE.md §5.2` and `config.example.yaml` now carry the ADAM-6060
+  bench finding** (`BENCH.md §10` finding 4): the 6060 does not expose its
+  FSV/Communication-WDT config over Modbus, so `require_hw_watchdog: true`
+  can never pass on that model — it must be `false`, the §5.1 cable-pull
+  test is the F1 acceptance gate, and the cable-pull must be re-run after
+  any ADAM swap or factory reset. Previously §5.2 and the example config
+  read as if the readback was expected to work, which would dead-end a
+  commissioning that followed them literally.
+
 ### Added (safety-critical — F1: ADAM hardware fail-safe now verified by software)
 
 - **The ADAM-6060 driver reads the host-watchdog / DO safety-value config back
@@ -295,6 +339,22 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
   data value).
 - Mode-policy rejection returns Modbus exception 0x02 instead of the
   ICD-preferred 0x04 (server device failure).
+- Writes with an out-of-pattern VALUE to a defined command register
+  (e.g. `cmd_inhibit=5`, `cmd_test=0`) are acknowledged on the wire and
+  ignored, instead of returning the ICD §6-preferred exception 0x03.
+  pymodbus 3.7's `validate()` hook receives only (function code, address,
+  count) — never the written value — so there is no hook from which to
+  reject by value; the write is dropped after acknowledgement
+  (`RegisterStore.write_register` returns no intent → no relay action, no
+  read-back change). The safety-relevant property (an out-of-pattern value
+  never reaches a relay) holds and is pinned, together with the
+  acknowledged-and-ignored wire behaviour, by
+  `tests/test_icd_contract.py::test_invalid_value_writes_are_acknowledged_and_ignored`.
+  This supersedes the older "Fixed" claim further down that invalid-value
+  writes return a Modbus exception — verified current behaviour is
+  acknowledged-and-ignored; only invalid-*address* writes get the exception.
+  GenWatch's command path only ever writes `0x0000`/`0x0001`, so the
+  deviation is unreachable from the production client.
 
 Both are pymodbus 3.7 limitations — `validate()` is the only hook that
 can emit a Modbus exception response and it can only emit 0x02. The

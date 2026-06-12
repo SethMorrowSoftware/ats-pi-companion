@@ -97,6 +97,12 @@ class _GuardedSlaveContext(ModbusSlaveContext):
     ``setValues`` because pymodbus only translates ``validate()=False``
     into an exception response — raising from ``setValues`` would not
     yield a clean Modbus error for the client.
+
+    Value-level validation (ICD §6: out-of-pattern values must get 0x03)
+    cannot live here either — ``validate()`` never sees the written value.
+    Such writes are acknowledged and then dropped by
+    ``RegisterStore.write_register`` (no intent → no relay action); known
+    deviation, pinned by the ICD contract suite. See CHANGELOG.
     """
 
     def __init__(self, *args, store: RegisterStore, **kwargs):

@@ -193,6 +193,19 @@ drops.
 
 ### 5.2 Software readback of the §5.1 fail-safe (F1)
 
+> **ADAM-6060: this readback is NOT possible — keep
+> `require_hw_watchdog: false` on that model.** Bench validation on the
+> real module ([`BENCH.md §10`](./BENCH.md), finding 4) found the 6060
+> does not expose its FSV / Communication-WDT / host-idle registers over
+> Modbus at all (they are configurable only via the Windows .NET
+> Utility), so this self-check would always fail closed and refuse
+> outputs. On the 6060 the §5.1 **cable-pull test is the F1 acceptance
+> gate** ([`NEXTSTEPS.md`](./NEXTSTEPS.md) Stage 2/3.2): record it on
+> the sign-off, and **re-run it after any ADAM swap or factory reset** —
+> with the software gate waived, nothing else will warn you the FSV is
+> gone. The rest of this section applies to ADAM models/firmware that
+> do expose the registers.
+
 The §5.1 watchdog is configured by hand, and nothing used to confirm it
 stayed configured — skip the step, or later factory-reset / swap the ADAM,
 and the only backstop against a Pi crash stranding a latched relay was
