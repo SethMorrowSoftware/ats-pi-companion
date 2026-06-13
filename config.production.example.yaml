@@ -1,0 +1,56 @@
+# ATS-Pi PRODUCTION config — ADAM-6060 + ASCO Series 300
+# ───────────────────────────────────────────────────────────────────────────
+# Pre-staged from a bench-validated 6060. Fill the three <FILL-IN> IPs, then:
+#
+#   sudo cp config.production.example.yaml /etc/atspi/config.yaml
+#   sudo nano /etc/atspi/config.yaml          # set the <FILL-IN> values
+#   sudo systemctl restart atspi
+#
+# The 6060-specific settings below are BENCH-VERIFIED — do not change them
+# without re-running BENCH.md:
+#   • di_read: coils            (the 6060 answers DIs on coils, FC01)
+#   • require_hw_watchdog: false (the 6060's FSV/WDT is NOT Modbus-readable;
+#                                 the F1 cable-pull is the fail-safe gate)
+#   • port: 5020                (the service runs as the non-root 'atspi' user
+#                                 with no CAP_NET_BIND_SERVICE, so it CANNOT bind
+#                                 the privileged port 502 — keep 5020, which is
+#                                 already proven end-to-end with GenWatch)
+
+# ─── Modbus TCP server (what GenWatch reads) ──────────────────────────────
+# F3 (SAFETY): Modbus/TCP has NO auth — anything that can route to this port can
+# drive the switch within the mode policy. Bind to the Pi's specific OT IP, NOT
+# 0.0.0.0, and firewall-allowlist only the GenWatch Pi (see SIGN-OFF.md / §F3).
+modbus_server:
+  host: "<pi-ot-ip>"            # FILL IN — e.g. 192.168.0.51 — NOT 0.0.0.0
+  port: 5020                    # keep 5020; GenWatch ats.port must match
+  unit_id: 1                    # GenWatch ats.slave must match
+
+# ─── I/O driver (the physical interface to the ASCO via the ADAM-6060) ────
+io:
+  driver: adam                  # NEVER 'mock' in production (mock = fake healthy snapshot)
+  adam:
+    host: "<adam-ot-ip>"        # FILL IN — the ADAM's production OT IP (e.g. 192.168.1.251)
+    port: 502                   # the ADAM speaks Modbus/TCP on 502 — leave as-is
+    unit_id: 1
+    di_read: coils              # 6060 bench-verified — do not change
+    debounce_samples: 3         # ~300 ms; raise on an electrically noisy site
+    assumed_mode: auto          # auto = all commands allowed; 'manual' = inhibit-only
+    require_hw_watchdog: false  # 6060: F1 = cable-pull, not software readback
+
+# ─── Site identity (GenWatch's expected_unit_id MUST equal site.unit_id) ──
+site:
+  unit_id: 23                   # set GenWatch ats.expected_unit_id to this
+
+# ─── Persistence (transfer_count_lifetime must survive reboots, ICD §9.3) ──
+persistence:
+  state_file: /var/lib/atspi/state.json
+
+# ─── Reminder: GenWatch side ──────────────────────────────────────────────
+# In GenWatch /etc/genwatch/config.yaml:
+#   mock: false                 # wire the real H-100 (separate from the ATS link)
+#   ats:
+#     enabled: true
+#     host: <Pi OT IP>          # == modbus_server.host above
+#     port: 5020                # == modbus_server.port above
+#     slave: 1                  # == modbus_server.unit_id above
+#     expected_unit_id: 23      # == site.unit_id above

@@ -9,6 +9,34 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 ## [Unreleased]
 
+### Added (docs — turnkey field install packet)
+
+- **`docs/FIELD-INSTALL.md`, `docs/SIGN-OFF.md`, and
+  `config.production.example.yaml`** — a cabinet-install packet so the wiring
+  electrician needs no other doc on site. The field card renders the §3 terminal
+  map as a checkbox-per-wire table (power, network, DI/DO landings), flags the
+  parallel-sense engine-start input (DI5) and the factory-use ASCO terminals
+  14–16, and walks read-side-first verification before any relay is driven. The
+  sign-off sheet is a fill-in acceptance record for the F1/F3/F4/ICD/§8.3 gates.
+  The production config pre-locks the bench-verified 6060 settings (`di_read:
+  coils`, `require_hw_watchdog: false`) and keeps port `5020` — the service runs
+  as the non-root `atspi` user with no `CAP_NET_BIND_SERVICE`, so it cannot bind
+  the privileged 502 — leaving only the site IPs to fill in.
+
+### Added (docs — single end-to-end tutorial)
+
+- **`docs/TUTORIAL.md`: a linear, follow-along walkthrough of the whole job**,
+  from parts on the bench through wiring the ASCO to seeing state in GenWatch.
+  The detailed procedures already lived in `BENCH.md`, `NEXTSTEPS.md`, and
+  `HARDWARE.md`, but in three separate files with a safety-critical ordering
+  (bench → staging → cabinet) that a first-time integrator had to infer. The
+  tutorial is a thin orchestration layer over those canonical docs — it
+  sequences the six phases, calls out each acceptance gate (F1/F3/F4/ICD/§8.3),
+  reproduces the ASCO terminal-mapping table inline (canonical source still
+  `HARDWARE.md §3`), and links each phase to its reference doc rather than
+  duplicating the deep detail. Linked from the README docs index and the
+  Production-deployment section as the recommended starting point.
+
 ### Added (safety-critical — ICD §9.3 reset-on-reboot now actively enforced)
 
 - **All four command outputs are driven OFF at service startup and on
