@@ -21,7 +21,7 @@
 # drive the switch within the mode policy. Bind to the Pi's specific OT IP, NOT
 # 0.0.0.0, and firewall-allowlist only the GenWatch Pi (see SIGN-OFF.md / §F3).
 modbus_server:
-  host: <FILL-IN: Pi OT IP>     # e.g. 192.168.0.51 — NOT 0.0.0.0
+  host: "<pi-ot-ip>"            # FILL IN — e.g. 192.168.0.51 — NOT 0.0.0.0
   port: 5020                    # keep 5020; GenWatch ats.port must match
   unit_id: 1                    # GenWatch ats.slave must match
 
@@ -29,7 +29,7 @@ modbus_server:
 io:
   driver: adam                  # NEVER 'mock' in production (mock = fake healthy snapshot)
   adam:
-    host: <FILL-IN: ADAM OT IP> # the ADAM's production OT IP (e.g. 192.168.1.251)
+    host: "<adam-ot-ip>"        # FILL IN — the ADAM's production OT IP (e.g. 192.168.1.251)
     port: 502                   # the ADAM speaks Modbus/TCP on 502 — leave as-is
     unit_id: 1
     di_read: coils              # 6060 bench-verified — do not change
