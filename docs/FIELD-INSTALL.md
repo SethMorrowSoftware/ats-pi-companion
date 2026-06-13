@@ -27,7 +27,7 @@ the ATS. Ten signal wires total, plus power and two network drops:
   ┌────────┐   6 inputs    ┌──────────┐   Cat6        ┌──────────┐
   │ dry    │ ───────────▶  │ DI0..DI5 │ ───────────▶  │ OT switch│──▶ Pi ──▶ GenWatch
   │ contacts│              │          │               └──────────┘
-  │        │   4 outputs   │ DO0..DO3 │
+  │        │   4 outputs   │ RL0..RL3 │
   │ command│ ◀───────────  │ relays   │
   └────────┘               └──────────┘
                             ▲ +Vs/GND
@@ -83,19 +83,25 @@ disturb the existing engine-start wire.
 
 ## Step 4 — OUTPUT wires: ADAM relays → ASCO command inputs
 
-Each ADAM relay is a **dry Form-A contact (two terminals)**. Land the relay's
-two terminals across the two ASCO input terminals.
+> 🏷️ **Label check — "RL" *is* the output.** The ADAM silkscreens these
+> outputs **`RL0`–`RL5`** ("RL" = relay) — the same channels the software and
+> this card call **`DO0`–`DO5`**. `DO0` = the `RL0` terminals, `DO1` = `RL1`,
+> and so on, one-to-one. (The `DI` side matches this card as-is.)
 
-| ✓ | ADAM relay | ASCO command input | Function |
+Each ADAM relay is a **dry, normally-open contact** — a volt-free switch, **no
+polarity**: land its two terminals across the two ASCO input terminals (if a
+channel has three terminals — COM/NO/NC — use **COM + NO**).
+
+| ✓ | ADAM relay (silkscreen = card) | ASCO command input | Function |
 |---|---|---|---|
-| ☐ | **DO0** | terminals **6 – 7** | Test (momentary) |
-| ☐ | **DO1** | terminals **8 – 9** | Force Transfer (maintained) |
-| ☐ | **DO2** | terminals **10 – 11** | Inhibit (maintained) |
-| ☐ | **DO3** | terminals **12 – 13** | Bypass time delay (momentary) |
+| ☐ | **RL0** (= DO0) | terminals **6 – 7** | Test (momentary) |
+| ☐ | **RL1** (= DO1) | terminals **8 – 9** | Force Transfer (maintained) |
+| ☐ | **RL2** (= DO2) | terminals **10 – 11** | Inhibit (maintained) |
+| ☐ | **RL3** (= DO3) | terminals **12 – 13** | Bypass time delay (momentary) |
 
 ⛔ **DO NOT** land anything on ASCO terminals **14, 15, or 16**, and leave ADAM
-**DO4 / DO5** unused. Those are factory-use — driving them can **damage the
-controller**.
+**RL4 / RL5** (= DO4 / DO5) unused. Those are factory-use — driving them can
+**damage the controller**.
 
 ## Step 5 — Re-energize
 
