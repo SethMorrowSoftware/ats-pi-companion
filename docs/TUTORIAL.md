@@ -312,6 +312,12 @@ recorded as pass, with **F1 verified on the real unit**.
 > Canonical: **[`HARDWARE.md §3, §5, §6, §7`](./HARDWARE.md)**. Only now go to
 > the switch. What remains is physical.
 
+> 🔧 **Hand the installer [`FIELD-INSTALL.md`](./FIELD-INSTALL.md)** — a
+> one-page, print-and-follow wiring card (the §6.1 table as a checkbox per wire,
+> plus power, network, and read-side-first verification) that needs no other doc
+> at the cabinet. Record the result on [`SIGN-OFF.md`](./SIGN-OFF.md), and
+> pre-stage [`config.production.example.yaml`](../config.production.example.yaml).
+
 ### 6.1 The terminal mapping
 
 This is the wiring. Each row is one channel on the ADAM-6060.
@@ -422,6 +428,8 @@ release log lines, rollback, and last resorts.
 | Doc | When |
 |---|---|
 | **TUTORIAL.md** (this) | The linear start-to-finish path |
+| [`FIELD-INSTALL.md`](./FIELD-INSTALL.md) | One-page wiring card for the installing electrician (Phase 6) |
+| [`SIGN-OFF.md`](./SIGN-OFF.md) | Fill-in commissioning acceptance sheet (Phases 5–6) |
 | [`BENCH.md`](./BENCH.md) | Bare-module bench validation (Phase 1) |
 | [`NEXTSTEPS.md`](./NEXTSTEPS.md) | Staging: fail-safe, network, GenWatch (Phases 2–5) |
 | [`HARDWARE.md`](./HARDWARE.md) | BOM, ASCO wiring, cabinet install (Phases 0, 6) |

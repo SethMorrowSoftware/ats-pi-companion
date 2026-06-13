@@ -89,6 +89,11 @@ linear walkthrough of the whole job, from parts on the bench through wiring the
 ASCO to seeing state in GenWatch, in the order it must be done. The summary
 below is the quick reference; the tutorial stitches the deep docs together.
 
+For the cabinet visit, hand the electrician
+[`docs/FIELD-INSTALL.md`](./docs/FIELD-INSTALL.md) (a print-and-follow wiring
+card), pre-stage [`config.production.example.yaml`](./config.production.example.yaml),
+and record acceptance on [`docs/SIGN-OFF.md`](./docs/SIGN-OFF.md).
+
 Two helper scripts wrap the commissioning sequence:
 
 ```bash
@@ -127,6 +132,8 @@ src/atspi/
 
 docs/
   TUTORIAL.md        start here — linear parts → ASCO → GenWatch walkthrough
+  FIELD-INSTALL.md   one-page wiring card for the installing electrician
+  SIGN-OFF.md        fill-in commissioning acceptance sheet
   SPEC.md            implementation architecture
   HARDWARE.md        BOM, wiring, install, commissioning checklist
   BENCH.md           bare-module bench bring-up + validation (pre-ASCO)
