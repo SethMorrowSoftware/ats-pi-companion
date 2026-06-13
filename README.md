@@ -84,6 +84,11 @@ a running service through state transitions without recompiling.
 
 ## Production deployment
 
+**New to this? Start with [`docs/TUTORIAL.md`](./docs/TUTORIAL.md)** — a single
+linear walkthrough of the whole job, from parts on the bench through wiring the
+ASCO to seeing state in GenWatch, in the order it must be done. The summary
+below is the quick reference; the tutorial stitches the deep docs together.
+
 Two helper scripts wrap the commissioning sequence:
 
 ```bash
@@ -121,6 +126,7 @@ src/atspi/
   notify.py          sd_notify (systemd Type=notify)
 
 docs/
+  TUTORIAL.md        start here — linear parts → ASCO → GenWatch walkthrough
   SPEC.md            implementation architecture
   HARDWARE.md        BOM, wiring, install, commissioning checklist
   BENCH.md           bare-module bench bring-up + validation (pre-ASCO)

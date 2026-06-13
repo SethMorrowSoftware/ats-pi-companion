@@ -9,6 +9,20 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 ## [Unreleased]
 
+### Added (docs — single end-to-end tutorial)
+
+- **`docs/TUTORIAL.md`: a linear, follow-along walkthrough of the whole job**,
+  from parts on the bench through wiring the ASCO to seeing state in GenWatch.
+  The detailed procedures already lived in `BENCH.md`, `NEXTSTEPS.md`, and
+  `HARDWARE.md`, but in three separate files with a safety-critical ordering
+  (bench → staging → cabinet) that a first-time integrator had to infer. The
+  tutorial is a thin orchestration layer over those canonical docs — it
+  sequences the six phases, calls out each acceptance gate (F1/F3/F4/ICD/§8.3),
+  reproduces the ASCO terminal-mapping table inline (canonical source still
+  `HARDWARE.md §3`), and links each phase to its reference doc rather than
+  duplicating the deep detail. Linked from the README docs index and the
+  Production-deployment section as the recommended starting point.
+
 ### Added (safety-critical — ICD §9.3 reset-on-reboot now actively enforced)
 
 - **All four command outputs are driven OFF at service startup and on
