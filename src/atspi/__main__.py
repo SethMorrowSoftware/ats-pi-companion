@@ -69,29 +69,64 @@ def _build_io_driver(cfg) -> IODriver:
     if driver_name == "mock":
         return IOMockDriver()
     if driver_name == "adam":
-        # Lazy import — pulls in pymodbus client, not needed for mock-only dev
-        from .io_adam import HwWatchdogConfig, IOAdamDriver
-        wd = cfg.io.adam.hw_watchdog
-        return IOAdamDriver(
-            host=cfg.io.adam.host,
-            port=cfg.io.adam.port,
-            unit_id=cfg.io.adam.unit_id,
-            debounce_samples=cfg.io.adam.debounce_samples,
-            assumed_mode=cfg.io.adam.assumed_mode,
-            di_read=cfg.io.adam.di_read,
-            require_hw_watchdog=cfg.io.adam.require_hw_watchdog,
-            hw_watchdog=HwWatchdogConfig(
-                enable_register=wd.enable_register,
-                enable_expected=wd.enable_expected,
-                timeout_register=wd.timeout_register,
-                timeout_scale_s=wd.timeout_scale_s,
-                timeout_min_s=wd.timeout_min_s,
-                timeout_max_s=wd.timeout_max_s,
-                safety_value_register_base=wd.safety_value_register_base,
-                safety_value_count=wd.safety_value_count,
-            ),
+        return _build_adam_driver(cfg)
+    if driver_name == "hybrid":
+        # Monitoring over serial (ASCO Group 5 Modbus RTU), control over the
+        # ADAM. The ADAM half — including the F1 hardware fail-safe — is built
+        # exactly as for driver: adam; only the read path is replaced.
+        from .io_asco_serial import AscoSerialConfig, AscoSerialReader
+        from .io_hybrid import IOHybridDriver
+        s = cfg.io.asco_serial
+        reader = AscoSerialReader(
+            AscoSerialConfig(
+                port=s.port,
+                baudrate=s.baudrate,
+                bytesize=s.bytesize,
+                parity=s.parity,
+                stopbits=s.stopbits,
+                unit_id=s.unit_id,
+                timeout_s=s.timeout_s,
+                assumed_mode=s.assumed_mode,
+                status_register=s.status_register,
+                status_register_count=s.status_register_count,
+                on_normal_bit=s.on_normal_bit,
+                on_emergency_bit=s.on_emergency_bit,
+                normal_available_bit=s.normal_available_bit,
+                emergency_available_bit=s.emergency_available_bit,
+                transferring_bit=s.transferring_bit,
+                engine_start_bit=s.engine_start_bit,
+            )
         )
+        return IOHybridDriver(reader=reader, outputs=_build_adam_driver(cfg))
     raise ValueError(f"unknown io.driver: {driver_name!r}")
+
+
+def _build_adam_driver(cfg):
+    """Construct the ADAM-6060 driver from cfg.io.adam. Shared by the 'adam'
+    and 'hybrid' drivers (hybrid uses it for the control/output path).
+    """
+    # Lazy import — pulls in pymodbus client, not needed for mock-only dev
+    from .io_adam import HwWatchdogConfig, IOAdamDriver
+    wd = cfg.io.adam.hw_watchdog
+    return IOAdamDriver(
+        host=cfg.io.adam.host,
+        port=cfg.io.adam.port,
+        unit_id=cfg.io.adam.unit_id,
+        debounce_samples=cfg.io.adam.debounce_samples,
+        assumed_mode=cfg.io.adam.assumed_mode,
+        di_read=cfg.io.adam.di_read,
+        require_hw_watchdog=cfg.io.adam.require_hw_watchdog,
+        hw_watchdog=HwWatchdogConfig(
+            enable_register=wd.enable_register,
+            enable_expected=wd.enable_expected,
+            timeout_register=wd.timeout_register,
+            timeout_scale_s=wd.timeout_scale_s,
+            timeout_min_s=wd.timeout_min_s,
+            timeout_max_s=wd.timeout_max_s,
+            safety_value_register_base=wd.safety_value_register_base,
+            safety_value_count=wd.safety_value_count,
+        ),
+    )
 
 
 async def _sampling_loop(driver: IODriver, store: RegisterStore) -> None:

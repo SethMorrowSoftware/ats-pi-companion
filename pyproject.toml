@@ -30,6 +30,10 @@ dependencies = [
     # widen the upper bound without porting server.py to the new API.
     "pymodbus>=3.7.4,<3.8",
     "PyYAML>=6.0",
+    # Required by pymodbus's AsyncModbusSerialClient (driver: hybrid reads the
+    # ASCO Group 5 over RS-485 Modbus RTU). pymodbus lists it only as an extra,
+    # so depend on it explicitly.
+    "pyserial>=3.5",
 ]
 
 [project.optional-dependencies]

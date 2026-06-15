@@ -9,6 +9,33 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 ## [Unreleased]
 
+### Added (`hybrid` driver — serial monitoring without 18RX / aux contacts)
+
+- **`driver: hybrid` reads ATS state from the ASCO Group 5 controller over
+  RS-485 Modbus RTU, while control stays on the ADAM-6060.** The contact-only
+  path (`driver: adam`) needs the 18RX REX module and 14AA/14BA aux contacts
+  (~$800) because the ASCO's 16-terminal customer strip exposes only one of the
+  six sense inputs (Load Disconnect). The hybrid driver reads position and
+  source availability straight from the controller's serial port via a ~$12
+  USB-RS485 adapter, so those accessories aren't needed. New modules
+  `io_asco_serial.py` (`AscoSerialReader`, an RTU reader that decodes a
+  configurable Group 5 holding-register/bit map into an `InputSnapshot`) and
+  `io_hybrid.py` (`IOHybridDriver`, composes the reader's inputs with an
+  `IOAdamDriver` for outputs). Every output-side method — including the F1
+  `hw_watchdog` gate and stuck-relay `check_output_consistency` — delegates to
+  the ADAM driver unchanged, so the control-side safety behaviour is identical
+  to `driver: adam`.
+- The Group 5 register/bit addresses are **BENCH-VERIFY from ASCO doc
+  `381339-221`** and default to unset; the driver **refuses to start** until
+  `status_register` and the four required bits are configured (it will not
+  publish a guessed switch position for a live switch) — the same fail-closed
+  discipline as the ADAM `di_read` / `hw_watchdog` addresses. New config block
+  `io.asco_serial` (strict-loader validated), wiring/commissioning guidance in
+  `docs/HARDWARE.md §3.1`, and `pyserial` added as an explicit dependency
+  (pymodbus lists it only as an extra). Covered by `tests/test_io_hybrid.py`
+  (20 tests: config fail-fast, bit/position decode, multi-register blocks, read
+  errors, and hybrid output delegation incl. the preserved F1 gate).
+
 ### Added (docs — turnkey field install packet)
 
 - **`docs/FIELD-INSTALL.md`, `docs/SIGN-OFF.md`, and

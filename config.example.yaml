@@ -25,8 +25,19 @@ modbus_server:
   unit_id: 1
 
 # ─── I/O driver (the physical interface to the ASCO) ──────────────────────
-# driver: 'mock'  — no hardware; for dev/CI and integration testing
-#         'adam'  — Advantech ADAM-6060 on Modbus TCP (production)
+# driver: 'mock'   — no hardware; for dev/CI and integration testing
+#         'adam'   — Advantech ADAM-6060 on Modbus TCP (production); reads all
+#                    6 sense inputs as dry contacts (needs 18RX + 14AA/14BA
+#                    accessories for position/source-availability) and drives
+#                    the 4 command relays
+#         'hybrid' — monitor over serial, control over the ADAM. Reads position
+#                    + source availability straight from the ASCO Group 5
+#                    controller over RS-485 Modbus RTU (a USB-RS485 adapter on
+#                    the Pi), so NO 18RX / aux-contact accessories are needed;
+#                    the ADAM still drives the 4 command relays (terminals
+#                    6-13) and keeps the F1 hardware fail-safe. See
+#                    HARDWARE.md §3.1. Configure BOTH io.adam (outputs) and
+#                    io.asco_serial (inputs) below.
 #
 # ┌─────────────────────────────────────────────────────────────────────┐
 # │ PRODUCTION DEPLOY: change `driver: mock` to `driver: adam`. With    │
@@ -112,6 +123,45 @@ io:
     #   timeout_max_s: 10
     #   safety_value_register_base: 0x0000  # first per-DO safety-value register
     #   safety_value_count: 6             # DO 0..5 (all must read 0/OFF)
+
+  # Used when driver: hybrid — the ASCO Group 5 controller read over RS-485
+  # Modbus RTU (USB-RS485 adapter → the controller's serial/DB9 port). This
+  # replaces the 18RX + 14AA/14BA accessories: position and source availability
+  # come straight from the controller. (Control still goes through io.adam
+  # above — the ADAM relays on terminals 6-13.) See HARDWARE.md §3.1.
+  asco_serial:
+    # Serial link. 8N1 is fixed by ASCO doc 381339-221 (RTU mode only). Set the
+    # controller's RS485 address + baud on its front panel (General →
+    # Communication) and match them here. 'port' is the USB-RS485 adapter.
+    port: /dev/ttyUSB0
+    baudrate: 19200
+    bytesize: 8
+    parity: "N"
+    stopbits: 1
+    unit_id: 1            # controller RS485 address (1-247)
+    timeout_s: 1.0
+
+    # ATS mode reported to GenWatch and used as the command gate (ICD §6), same
+    # semantics as io.adam.assumed_mode: auto|manual|test|unknown. (Mapping the
+    # controller's *real* mode register is a future bench-verify item.)
+    assumed_mode: auto
+
+    # ── Group 5 status map (holding registers, FC03) — ALL BENCH-VERIFY ──
+    # Pull these from ASCO doc 381339-221 ("Connectivity to the Power Manager Xp
+    # & 7000 Series Group 5 Controller via Modbus") and CONFIRM ON THE UNIT;
+    # they can shift by firmware, exactly like the io.adam addresses above.
+    # Bit indices are FLAT across the read block: bit b lives in register
+    # (status_register + b//16), bit (b%16). status_register + the four required
+    # bits MUST be set or the hybrid driver refuses to start (it will not
+    # publish a guessed switch position for a live switch).
+    #   status_register: 0x0000          # first status holding register (PDU offset)
+    #   status_register_count: 1         # consecutive words read as one bit array
+    #   on_normal_bit: 0                 # load is on the Normal (utility) source
+    #   on_emergency_bit: 1              # load is on the Emergency (generator) source
+    #   normal_available_bit: 2          # Normal source available
+    #   emergency_available_bit: 3       # Emergency source available
+    #   transferring_bit: 4              # optional: transfer in progress
+    #   engine_start_bit: 5              # optional: engine-start asserted
 
 # ─── Site identification ──────────────────────────────────────────────────
 # Reported via the ats_pi_unit_id register (ICD §5.4). GenWatch's

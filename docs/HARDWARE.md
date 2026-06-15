@@ -85,6 +85,96 @@ sudo ./testadam.sh --di-read discrete_inputs     # then set io.adam.di_read to m
 
 The relay outputs (DOs) are always coils (FC01 read-back / FC05 write).
 
+## 3.1 Serial monitoring path (`driver: hybrid`) — no 18RX / aux contacts
+
+The contact path above needs the **18RX REX module** and **14AA/14BA aux
+contacts** (BOM items 7-8, ~$800) because the ASCO's 16-terminal customer
+strip exposes only **one** of the six sense inputs (Load Disconnect → DI 0).
+Position and source availability aren't on that strip — they come from those
+accessories.
+
+If those accessories aren't installed and you won't buy them, the
+**`hybrid` driver** reads the same facts straight from the ASCO **Group 5
+controller** over its **RS-485 Modbus RTU** serial port instead, for the price
+of a ~$12 USB-RS485 adapter. The split:
+
+| Half | Interface | Carries |
+|---|---|---|
+| **Monitor** | ASCO Group 5 serial (RS-485 Modbus RTU) → USB-RS485 adapter → Pi | position, normal/emergency available, engine-start |
+| **Control** | ADAM-6060 relays → ASCO terminals 6-13 (unchanged from §3) | Test / Inhibit / Force-Transfer / Bypass |
+
+Control stays on the ADAM deliberately: its relays drive documented dry-contact
+inputs, and its host-idle watchdog is the **F1 hardware fail-safe** (§5.1) that
+releases a latched relay if the Pi dies. ASCO serial *write* support is
+firmware-dependent and would need its own safety analysis, so commanding is not
+moved to serial. **In hybrid mode the ADAM DIs are unused** — you only land the
+four DO pairs (terminals 6-13) and the serial cable.
+
+### BOM delta vs §1
+
+- **USB-to-RS485 adapter** (~$12), e.g. an FTDI-based dongle. Confirm
+  **2-wire vs 4-wire** and the **DB9 pinout** against the controller's
+  wiring — see below.
+- *Not needed:* 18RX (item 7), 14AA/14BA (item 8).
+
+### Wiring & controller setup
+
+1. **Connector.** Your unit has a DB9 on the bottom of the Group 5 controller.
+   ASCO comms is **RS-485** (some vintages present it on the DB9, others on a
+   `Y Z B A 24 GND` terminal block for 4-wire full-duplex). **Confirm the DB9
+   pinout and whether it's 2-wire or 4-wire** from ASCO operator's manual
+   `381333-289` and the Modbus doc `381339-221` before wiring the adapter —
+   RS-485 is differential (A/B + signal ground), *not* RS-232, so a straight
+   PC serial cable will not work.
+2. **Controller front panel:** General → Communication (RS485 port). Set a
+   **slave address** (1-247) and **baud**; the framing is fixed at **8N1, RTU**.
+   Match these in config.
+3. The Pi sees the adapter as e.g. `/dev/ttyUSB0` (`io.asco_serial.port`).
+
+### Config
+
+```yaml
+io:
+  driver: hybrid
+  adam:            # control side — same as driver: adam (§3, §5.1)
+    host: 192.168.1.251
+    require_hw_watchdog: false   # ADAM-6060 can't read its FSV back (§5.2)
+  asco_serial:     # monitoring side
+    port: /dev/ttyUSB0
+    baudrate: 19200            # match the controller front panel
+    unit_id: 1                 # controller RS485 address
+    # Group 5 status map — BENCH-VERIFY from 381339-221 (see below):
+    status_register: 0x????
+    on_normal_bit: ?
+    on_emergency_bit: ?
+    normal_available_bit: ?
+    emergency_available_bit: ?
+    # transferring_bit / engine_start_bit are optional
+```
+
+> The hybrid driver **refuses to start** until `status_register` and the four
+> required bits are set — it will not publish a guessed switch position for a
+> live switch.
+
+### BENCH-VERIFY the register map (same discipline as §3 / §5.2)
+
+The exact holding-register address and bit positions live in ASCO doc
+**`381339-221`** ("Connectivity to the Power Manager Xp & 7000 Series Group 5
+Controller via Modbus") and can shift by firmware. Confirm them on the unit
+before trusting the published state:
+
+```bash
+# Read the status register over RTU (adjust port/baud/addr/count/reg):
+modpoll -m rtu -b 19200 -d 8 -p none -s 1 -a 1 -t 4 -r <status_register+1> -c <count> /dev/ttyUSB0
+```
+
+Operate the switch (Normal → Emergency, drop a source) and watch which bits
+track which fact; those bit numbers are your `*_bit` values. Bit indices are
+**flat across the read block** — bit `b` is register `status_register + b//16`,
+bit `b%16` — so a map that spreads the signals over several registers just needs
+a larger `status_register_count`. Record the verified addresses on the
+commissioning sign-off, exactly like the §5.2 watchdog registers.
+
 ## 4. Network
 
 - ADAM-6060: static IP, recommend `192.168.1.251`, on the OT VLAN
