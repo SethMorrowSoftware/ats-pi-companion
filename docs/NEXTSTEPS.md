@@ -213,11 +213,18 @@ modpoll -m tcp -a 1 -r 54 -c 1 <ats-pi OT IP>   # 0x0035 = site.unit_id
 modpoll -m tcp -a 1 -r 49 -c 2 <ats-pi OT IP>   # ICD version (0x0030,0x0031) -> 1, 0
 ```
 
-> On a bare bench (no ASCO) the card will show **position = transferring** —
-> DI0 floats high and reads as "Load Disconnect asserted" (`BENCH.md §8`).
-> That's expected; the real position appears once the ASCO is wired.
+> On a bare bench (no ASCO) the **contact path** (`driver: adam`) shows
+> **position = transferring** — DI0 floats high and reads as "Load Disconnect
+> asserted" (`BENCH.md §8`); the real position appears once the ASCO is wired.
+> (On the **hybrid** path position comes from the Group 5 bits, so it reads
+> whatever the controller reports — no DI0-float artifact.)
 
 ### 4.3 Drive DI transitions, watch GenWatch follow
+> **Hybrid path:** the ADAM DIs are unused — jumpering them moves nothing.
+> Instead drive the **controller / switch** itself (or your Group 5 RTU
+> simulator) and watch the GenWatch card follow (controller → serial → ATS-Pi →
+> GenWatch). The jumper table below is the contact-path (`driver: adam`) equivalent.
+
 Jumper DIs and confirm the **GenWatch card** tracks them — this proves the
 full chain visually (contact → ADAM → ATS-Pi → GenWatch). DIs are dry-contact
 (open = 1, jumpered-to-common = 0); to present a sane state on the bench:

@@ -42,7 +42,7 @@ modpoll -m tcp -a 1 -r 6 -c 1 <ats-pi>     # PDU 0x0005 = fault_summary
 | 0 | `0x01` | INPUT_FAULT | Last ADAM read failed, OR a Modbus write was rejected by mode policy (see §3) |
 | 1 | `0x02` | OUTPUT_FAULT | Last command write to ADAM failed, OR commanded-vs-readback mismatch (stuck relay), OR the F1 hardware fail-safe is unverified (see §4c) |
 | 2 | `0x04` | MODE_UNKNOWN | The driver reports `ats_mode=unknown` (only relevant once a mode-sensing contact is wired) |
-| 3 | `0x08` | CALIBRATION | Reserved |
+| 3 | `0x08` | CALIBRATION | Impossible contact/position combo — both position-sense inputs asserted at once (welded/miswired aux, or Group 5 status bit). Check the position sense against the real switch |
 
 ---
 
@@ -93,6 +93,20 @@ modpoll -m tcp -a 1 -r 1 -c 6 <adam-ip>
   switch port LEDs. The ATS-Pi will keep retrying every 100 ms; recovery
   is automatic the moment the ADAM responds.
 
+Under `driver: hybrid`, monitoring rides the **serial** link to the ASCO
+Group 5 controller, not the ADAM — so also check the serial path:
+
+```bash
+ls -l /dev/ttyUSB*     # adapter present? (config default is /dev/ttyUSB0)
+```
+
+If the node is missing, the USB-RS485 adapter dropped off (re-seat it;
+`dmesg | grep -iE 'ttyUSB|ttyACM'`). Confirm the controller's RS485
+**address and baud** match `io.asco_serial.unit_id` / `baudrate` — a
+mismatch reads as a serial timeout (INPUT_FAULT, §3), not a missing node.
+The ADAM reachability check above still applies to the **control** (relay)
+side in hybrid.
+
 ### Step 4: Is GenWatch's expected_unit_id matching?
 
 The site identifier register is at PDU `0x0035`:
@@ -122,6 +136,17 @@ modpoll -m tcp -a 1 -r 1 -c 6 <ats-pi>     # 0x0000-0x0005 core state
 `testadam.sh --di-read discrete_inputs` (HARDWARE.md §3). On the
 ADAM-6000 series the documented DI mapping is FC02.
 
+> **This step is `driver: adam` only.** In hybrid the DIs aren't read at
+> all, so `di_read` is irrelevant — flipping it fixes nothing. The hybrid
+> analogue of "reads succeed but the state is wrong" is a **wrong
+> `io.asco_serial` status_register / bit map**: position/availability come
+> from the serial holding register, so a mis-set `status_register` or a
+> swapped `on_normal_bit` / `normal_available_bit` etc. yields a plausible-
+> but-wrong served state with no INPUT_FAULT. Fix it by **bench-verifying the
+> map against ASCO doc 381339-221** ([HARDWARE.md §3.1](./HARDWARE.md)) — read
+> the register over RTU while operating the switch and confirm which bit
+> tracks which fact — **not** by touching `di_read`.
+
 ---
 
 ## 3. "fault_summary shows INPUT_FAULT (bit 0)"
@@ -142,6 +167,16 @@ The sampling loop logs the **first** failure of a streak at WARNING, then
 throttles repeats to one reminder every ~30 s (so a hard outage doesn't
 flood the journal at 10 lines/s), and logs `sampling recovered …` when
 reads succeed again. INPUT_FAULT clears on that first successful read.
+
+> **Under `driver: hybrid` an INPUT_FAULT is a *serial* read failure, not an
+> ADAM coil read.** Monitoring comes from the ASCO Group 5 controller over
+> RS-485, so the journal shows `ASCO ... read_holding_registers ... failed`
+> or `ASCO serial open ... failed` rather than `ADAM read_coils(...)`. Don't
+> chase the ADAM here — diagnose the serial side: confirm the adapter node
+> with `ls -l /dev/ttyUSB*`, that the controller's RS485 address/baud match
+> `io.asco_serial`, and the wiring/termination per
+> [HARDWARE.md §3.1](./HARDWARE.md). (The ADAM is still the **control** path
+> in hybrid, so OUTPUT-side faults in §4 still point at the ADAM.)
 
 **Is it a transient network blip or a real wiring fault?**
 The driver uses a 500 ms Modbus timeout (1 retry). A single

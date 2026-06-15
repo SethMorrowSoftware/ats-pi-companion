@@ -12,6 +12,9 @@ on the service itself.
 - `pip` and `venv`
 - For ADAM testing: an ADAM-6060 (or any Modbus TCP I/O device with
   ≥ 6 DI + 6 DO) on the same LAN
+- For the **hybrid** path: also a USB-RS485 adapter plus an ASCO Group 5
+  controller — or any serial Modbus RTU slave simulator on the adapter's
+  `/dev/ttyUSB*` node — to exercise the serial monitoring read
 
 ## Setup
 
@@ -70,8 +73,9 @@ python -m ruff check src/ tests/
 ```
 
 The suite (currently 266 tests) runs entirely without hardware — mock
-driver for the I/O layer, a fake pymodbus client for the ADAM driver,
-`tmp_path` for persistence. CI runs both jobs on every push plus a
+driver for the I/O layer, a fake pymodbus client for the ADAM and hybrid
+drivers (`test_io_adam.py`, `test_io_hybrid.py`), `tmp_path` for
+persistence. CI runs both jobs on every push plus a
 `soak` job that starts the real binary, performs a real Modbus read,
 and asserts a clean SIGTERM exit; and an `audit` job (`pip-audit`,
 informational).

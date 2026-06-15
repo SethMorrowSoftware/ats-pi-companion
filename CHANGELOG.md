@@ -9,6 +9,38 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 ## [Unreleased]
 
+### Added (hybrid / serial commissioning — the Waveshare RS-485 path is now deployable)
+
+- **The `driver: hybrid` path (ADAM-6060 control + ASCO Group 5 read over a
+  USB-RS485 adapter) is now documented and runnable end-to-end.** The driver
+  code already existed and fails closed, but a deployer couldn't get there: the
+  commissioning docs assumed the contact-only `adam` path and the service
+  couldn't even open the serial port.
+  - **Serial-device access (hard blocker).** The non-root `atspi` service user
+    had no access to `/dev/ttyUSB0`, so the serial half silently never came up
+    as a service (bench `modpoll` as root worked, hiding it). The systemd unit
+    now sets `SupplementaryGroups=dialout` and `install.sh` adds `atspi` to
+    `dialout`.
+  - **`HARDWARE.md §3.1`** gains the Pi-side bring-up that was missing: confirm
+    the serial device node (`lsusb`/`dmesg`, FTDI vs CH34x, `ttyUSB0` vs
+    `ttyACM0`), the A/B(+/−)/GND wiring procedure (swap-if-silent, 120 Ω
+    termination), the `dialout` requirement, and the consequence of leaving the
+    optional `transferring`/`engine_start` bits unset.
+  - **The commissioning narrative now branches for hybrid:** `TUTORIAL.md`
+    (driver-path callouts in the bench/config/transition phases), `BENCH.md`
+    (scope banner; the DI checks marked adam-only), `NEXTSTEPS.md` (the
+    DI-jumper table is contact-path-only — hybrid drives the controller),
+    `FIELD-INSTALL.md` (a `Step 3-H` that lands the single USB-RS485 run instead
+    of six DI contacts), `SIGN-OFF.md` (a `driver:` field + an `io.asco_serial`
+    bench-verified record), `RUNBOOK.md` (serial INPUT_FAULT signature; the
+    wrong-map fix is a bench-verify, not a `di_read` flip), and `README.md` /
+    `DEVELOPMENT.md`. The entire control/server side (F1 cable-pull, comms-loss
+    release, mode policy, the 5020 server) is identical and unchanged.
+  - `RUNBOOK.md` fault table: `CALIBRATION` (bit 3) is no longer "Reserved" — it
+    is now emitted (both position-sense inputs asserted at once), so the table
+    states its real meaning; `config.example.yaml` spells out the optional-bit
+    consequences inline.
+
 ### Fixed (commissioning plan — Modbus server port reconciled to 5020)
 
 - **Every doc, config default, and acceptance check now uses port `5020` for

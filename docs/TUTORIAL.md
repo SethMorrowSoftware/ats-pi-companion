@@ -76,6 +76,13 @@ cabinet.
 Direct-cable the Pi to the ADAM. The ADAM ships at `10.0.0.1/24`, Modbus TCP
 on `502`.
 
+> **Hybrid path:** this phase bench-verifies the **ADAM (control) half** below.
+> You must **also** bring up the serial monitoring half — confirm the USB-RS485
+> device node, wire A/B to the Group 5 controller, and bench-verify its
+> register/bit map — per **[`HARDWARE.md §3.1`](./HARDWARE.md)**. The DI steps
+> below (`di_read`, jumper each DI) are **contact-path-only**; in hybrid the ADAM
+> DIs are unused and monitoring comes from the controller over serial.
+
 ```bash
 # Pi: join the ADAM's factory subnet and confirm the link (BENCH.md §2)
 sudo ip addr add 10.0.0.2/24 dev eth0
@@ -119,9 +126,11 @@ that the software comms-loss watchdog drops a maintained relay on its own:
 - **Comms-loss auto-release** (ICD §8.3): `BENCH.md §9`. Assert Inhibit, go
   silent, watch DO2 drop at ~30 s.
 
-> **Expected on a bare bench:** `position` reads **`transferring`**, not
-> `unknown` — DI0 (Load Disconnect) floats high and reads as "transfer in
-> progress." Not a fault. `fault_summary: 0` is what you want. (`BENCH.md §8`.)
+> **Expected on a bare bench (contact path, `driver: adam`):** `position` reads
+> **`transferring`**, not `unknown` — DI0 (Load Disconnect) floats high and reads
+> as "transfer in progress." Not a fault. `fault_summary: 0` is what you want.
+> (`BENCH.md §8`.) On the **hybrid** path there's no ADAM DI0, so this artifact
+> doesn't occur — position comes from the Group 5 bits.
 
 ✅ **Gate — bench checklist** (`BENCH.md §12`): ping + snapshot, `di_read`
 confirmed, all 6 DIs track their jumper, all 6 relays drive + read back + rest
@@ -214,6 +223,11 @@ on the sign-off sheet** (host-idle timeout used, meter opened, post-pull read).
      state_file: /var/lib/atspi/state.json   # real path, not /tmp
    ```
 
+   > **Hybrid path:** set `io.driver: hybrid` and add the `io.asco_serial` block
+   > (device, baud, controller address, and the bench-verified `status_register`
+   > + bits) — `HARDWARE.md §3.1`. Without it the service **refuses to start**.
+   > The `io.adam` block stays (it's the control side); the ADAM DIs are unused.
+
 2. **Lock down the network (F3).** Modbus/TCP has **no authentication** —
    anything that can route to `:5020` can drive the switch within the mode
    policy, so the network boundary *is* a safety control. Bind to the OT IP
@@ -268,8 +282,13 @@ The ATS-Pi from Phase 3 is now serving real ADAM state on the OT network.
    table in `NEXTSTEPS.md §4.3` lists the jumper combos to present "on utility",
    "on generator", "normal source lost", "engine-start calling".
 
-   > On a bare bench the card shows **position = transferring** (DI0 floats
-   > high). Expected; the real position appears once the ASCO is wired.
+   > **Hybrid path:** the ADAM DIs are unused — jumpering moves nothing. Drive
+   > the **controller / switch** (or your Group 5 RTU simulator) instead and
+   > watch the card follow (controller → serial → ATS-Pi → GenWatch).
+
+   > On a bare bench the **contact path** shows **position = transferring** (DI0
+   > floats high). Expected; the real position appears once the ASCO is wired.
+   > (Hybrid reads position from the Group 5 bits — no DI0-float artifact.)
 
 4. **End-to-end comms-loss release (ICD §8.3)** — driven from GenWatch this
    time, not a script: assert Inhibit from GenWatch → confirm DO2 energises →
