@@ -10,7 +10,7 @@ rationale. Do the phases **in order**.
 ┌─────────────┐   dry      ┌─────────────┐   Modbus    ┌─────────────┐   Modbus    ┌──────────┐
 │  ASCO 300   │  contacts  │  ADAM-6060  │    TCP      │   ATS-Pi    │    TCP      │ GenWatch │
 │  ATS        │ ◀────────▶ │  6 DI + 6   │ ◀─────────▶ │   service   │ ◀─────────▶ │  Pi      │
-│             │            │  relay DO   │             │ (this proj) │  port 502   │ dashboard│
+│             │            │  relay DO   │             │ (this proj) │  port 5020  │ dashboard│
 └─────────────┘            └─────────────┘             └─────────────┘             └──────────┘
    Phase 6           Phases 1–2                    Phases 1,3                  Phase 4
 ```
@@ -207,7 +207,7 @@ on the sign-off sheet** (host-idle timeout used, meter opened, post-pull read).
        require_hw_watchdog: false  # required on the 6060 (Phase 2)
    modbus_server:
      host: 192.168.1.250          # the Pi's OT IP — NOT 0.0.0.0 (see step 2)
-     port: 502
+     port: 5020
    site:
      unit_id: 23                  # your real id — MUST equal GenWatch expected_unit_id
    persistence:
@@ -215,16 +215,16 @@ on the sign-off sheet** (host-idle timeout used, meter opened, post-pull read).
    ```
 
 2. **Lock down the network (F3).** Modbus/TCP has **no authentication** —
-   anything that can route to `:502` can drive the switch within the mode
+   anything that can route to `:5020` can drive the switch within the mode
    policy, so the network boundary *is* a safety control. Bind to the OT IP
    (above) and allowlist only the GenWatch Pi:
 
    ```bash
-   sudo iptables -A INPUT -p tcp --dport 502 -s <genwatch-ip> -j ACCEPT
-   sudo iptables -A INPUT -p tcp --dport 502 -j DROP
+   sudo iptables -A INPUT -p tcp --dport 5020 -s <genwatch-ip> -j ACCEPT
+   sudo iptables -A INPUT -p tcp --dport 5020 -j DROP
    ```
 
-   **Acceptance:** from a host *off* the OT segment, `nmap -p 502 <ats-pi-ip>`
+   **Acceptance:** from a host *off* the OT segment, `nmap -p 5020 <ats-pi-ip>`
    shows the port **filtered**.
 
 ✅ **Gate F3**: bound to the OT IP, firewall allowlist in place, `nmap` shows
@@ -245,7 +245,7 @@ The ATS-Pi from Phase 3 is now serving real ADAM state on the OT network.
    ats:
      enabled: true
      host: <ats-pi OT IP>      # 192.168.1.250
-     port: 502                 # must match modbus_server.port
+     port: 5020                # must match modbus_server.port
      expected_unit_id: 23      # MUST equal the ATS-Pi's site.unit_id
    ```
 
@@ -410,7 +410,7 @@ commissioning checklist (`HARDWARE.md §7`) and the sign-off sheet.
 |---|---|---|
 | `modpoll` returns `[0, 1, 1, 0, 0, 0]` no matter the ATS state | `driver: mock` still set | flip to `driver: adam` |
 | All DIs read `0` / `position` stuck `unknown` | wrong DI function code | `io.adam.di_read: discrete_inputs` and restart |
-| `modpoll` times out | Pi firewall or wrong bind | allow GenWatch→502; set `modbus_server.host` to the OT IP |
+| `modpoll` times out | Pi firewall or wrong bind | allow GenWatch→5020; set `modbus_server.host` to the OT IP |
 | `systemctl status` → `status=127` | venv install path | point `ExecStart=` at the venv's `atspi` |
 | `User/Group resolution: 'atspi' not found` | service user missing | `install.sh` creates it, or `useradd --system atspi` |
 | GenWatch shows "(via gen telemetry)" not "(via ATS-Pi)" | `expected_unit_id` mismatch | match it to `site.unit_id` (`0x0035`) |

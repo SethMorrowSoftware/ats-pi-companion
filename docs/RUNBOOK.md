@@ -71,7 +71,7 @@ systemctl status atspi
 From the GenWatch Pi:
 
 ```bash
-nc -zv <ats-pi> 502
+nc -zv <ats-pi> 5020
 ```
 
 - Connection refused → service is up but Modbus server crashed. Restart:
@@ -358,7 +358,7 @@ Expected: `[1, 0]` (major=1, minor=0).
 - If you see `[2, ...]` → the ATS-Pi is on a newer ICD major that GenWatch
   hasn't caught up to. Roll back the ATS-Pi or update GenWatch.
 - If the bytes don't decode at all → not an ATS-Pi on that port. Check
-  what's actually listening: `sudo lsof -i :502` on the box.
+  what's actually listening: `sudo lsof -i :5020` on the box.
 
 ---
 
@@ -411,10 +411,10 @@ PDU `0x0100` is `-r 257`.
 
 ```bash
 sudo systemctl stop atspi
-cd /opt/ats-pi-companion
+cd /path/to/ats-pi-companion   # the repo checkout you installed from
 git fetch
 git checkout <known-good-tag>
-sudo pip install -e .
+sudo ./install.sh              # idempotent; re-points the venv at this checkout
 sudo systemctl start atspi
 ```
 

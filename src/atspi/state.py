@@ -20,7 +20,14 @@ from collections import deque
 from dataclasses import dataclass, replace
 
 from . import ICD_VERSION, __version__
-from .io_driver import InputSnapshot, OutputState
+from .io_driver import (
+    FAULT_CALIBRATION,
+    FAULT_INPUT,
+    FAULT_MODE_UNKNOWN,
+    FAULT_OUTPUT,
+    InputSnapshot,
+    OutputState,
+)
 from .persistence import PersistedState, StateFile
 
 log = logging.getLogger("atspi.state")
@@ -81,11 +88,9 @@ DEFAULT_PULSE_MS = 750
 ROLLING_WINDOW_S = 24 * 3600
 
 
-# Fault-summary bit masks (ICD §5.1.1)
-FAULT_INPUT = 0x0001
-FAULT_OUTPUT = 0x0002
-FAULT_MODE_UNKNOWN = 0x0004
-FAULT_CALIBRATION = 0x0008
+# Fault-summary bit masks (ICD §5.1.1) are defined at the I/O boundary
+# (``atspi.io_driver``) and imported above; they are re-exported from this
+# module for the register store, the Modbus server, and the health decoder.
 
 # ICD §5.1.1: bits 4-15 are RESERVED and MUST be 0 on the wire. A buggy
 # driver that reports stray bits in InputSnapshot.fault_bits must not be

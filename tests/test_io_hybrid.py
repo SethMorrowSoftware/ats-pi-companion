@@ -309,3 +309,31 @@ async def test_hybrid_hw_watchdog_status_delegates_to_adam():
 async def test_hybrid_connect_returns_true_when_both_connect():
     hybrid, _ = _hybrid(require_hw_watchdog=False)
     assert await hybrid.connect() is True
+
+
+# ─── CALIBRATION fault: impossible Group 5 status combination (ICD §5.1.1) ───
+
+
+async def test_serial_both_position_bits_set_flags_calibration():
+    """Both on_normal and on_emergency status bits set at once is an impossible
+    combination — the serial reader must raise CALIBRATION (ICD §5.1.1) rather
+    than publish only a bare position=unknown a consumer can't act on.
+    """
+    from atspi.io_driver import FAULT_CALIBRATION
+
+    fake = FakeSerialClient()
+    fake.registers[_STATUS_REG] = _word(_BITS["on_normal_bit"], _BITS["on_emergency_bit"])
+    snap = await _reader(fake).read_inputs()
+    assert snap.position == "unknown"
+    assert snap.fault_bits & FAULT_CALIBRATION
+
+
+async def test_serial_single_position_bit_is_not_calibration():
+    """A legitimate single-source position carries no CALIBRATION bit."""
+    from atspi.io_driver import FAULT_CALIBRATION
+
+    fake = FakeSerialClient()
+    fake.registers[_STATUS_REG] = _word(_BITS["on_normal_bit"], _BITS["normal_available_bit"])
+    snap = await _reader(fake).read_inputs()
+    assert snap.position == "utility"
+    assert not (snap.fault_bits & FAULT_CALIBRATION)

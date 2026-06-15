@@ -8,8 +8,10 @@
 # See README.md for setup and docs/SPEC.md for behaviour.
 
 # ─── Modbus TCP server (the interface GenWatch reads) ─────────────────────
-# Bind address and port for the inbound Modbus TCP server. Port 502 is the
-# standard Modbus TCP port — use a high port (e.g. 5020) for dev to avoid root.
+# Bind address and port for the inbound Modbus TCP server. The default is the
+# high port 5020, NOT the privileged Modbus port 502: the service runs as the
+# non-root `atspi` user (no CAP_NET_BIND_SERVICE) and cannot bind 502. GenWatch's
+# `ats.port` must match this value (its default is 5020 too).
 #
 # SECURITY / F3: Modbus/TCP has NO authentication. Anything that can route to
 # this port can drive Test / Inhibit / Force-Transfer / Bypass within the
@@ -17,11 +19,11 @@
 # SAFETY control, not just tidiness — make it a deliberate, documented choice:
 #   1. Bind `host` to the specific OT-VLAN interface IP (e.g. 192.168.1.250),
 #      NOT 0.0.0.0, so the server isn't reachable from other interfaces.
-#   2. Firewall-allowlist so ONLY the GenWatch Pi can reach <pi>:502.
+#   2. Firewall-allowlist so ONLY the GenWatch Pi can reach <pi>:5020.
 # See HARDWARE.md §4.1. (0.0.0.0 is the dev default; change it for the plant.)
 modbus_server:
   host: 0.0.0.0
-  port: 502
+  port: 5020
   unit_id: 1
 
 # ─── I/O driver (the physical interface to the ASCO) ──────────────────────
@@ -93,7 +95,7 @@ io:
     # It is configured by hand at commissioning (HARDWARE.md §5.1). With
     # require_hw_watchdog: true (default) the driver reads that config back on
     # connect and REFUSES to assert any output (and publishes a persistent
-    # OUTPUT_FAULT → GenWatch sees a non-authoritative link) unless it confirms:
+    # OUTPUT_FAULT, surfaced as a fault alarm in GenWatch) unless it confirms:
     # watchdog enabled, timeout in the 5–10 s band, every DO safety value OFF.
     #
     # Set require_hw_watchdog: false ONLY as an explicit, auditable waiver for

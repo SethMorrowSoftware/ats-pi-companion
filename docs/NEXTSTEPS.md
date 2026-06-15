@@ -146,7 +146,7 @@ or edit the existing config. Set:
 - `io.driver: adam`, `io.adam.host: <ADAM OT IP>`, `io.adam.di_read: coils`
 - `site.unit_id:` the real per-site id (must equal GenWatch's
   `expected_unit_id` — see Stage 4). **Not** the default `1`/`23`.
-- `modbus_server.port: 502` (production), `modbus_server.host: <Pi OT IP>`
+- `modbus_server.port: 5020` (production), `modbus_server.host: <Pi OT IP>`
   (see 3.3 — **not** `0.0.0.0`)
 - `persistence.state_file: /var/lib/atspi/state.json` (real path, not `/tmp`)
 
@@ -165,7 +165,7 @@ gone and nothing will warn you — re-run Stage 2.)
 
 ### 3.3 Bind to the OT interface + firewall allowlist (F3)
 Modbus/TCP has no auth, so the network boundary *is* a safety control
-(`HARDWARE.md §4.1`). Anything that can route to `:502` can drive the switch
+(`HARDWARE.md §4.1`). Anything that can route to `:5020` can drive the switch
 within the mode policy.
 
 - **Bind** `modbus_server.host` to the Pi's specific OT-VLAN IP, not
@@ -173,12 +173,13 @@ within the mode policy.
 - **Allowlist** only the GenWatch Pi:
 
 ```bash
-sudo iptables -A INPUT -p tcp --dport 502 -s <genwatch-ip> -j ACCEPT
-sudo iptables -A INPUT -p tcp --dport 502 -j DROP
+sudo iptables -A INPUT -p tcp --dport 5020 -s <genwatch-ip> -j ACCEPT
+sudo iptables -A INPUT -p tcp --dport 5020 -j DROP
 ```
 
-- **Acceptance:** from a host *off* the OT segment, `nmap -p 502 <ats-pi-ip>`
-  shows the port **filtered**. Record it.
+- **Acceptance:** from a host *off* the OT segment, `nmap -p 5020 <ats-pi-ip>`
+  shows the port **filtered**. Record it. (`502` in any older notes is stale —
+  the non-root service listens on `5020`.)
 
 ---
 
@@ -195,7 +196,7 @@ In GenWatch's `/etc/genwatch/config.yaml`:
 ats:
   enabled: true
   host: <ats-pi OT IP>
-  port: 502                 # must match modbus_server.port
+  port: 5020                # must match modbus_server.port
   expected_unit_id: 23      # MUST equal the ATS-Pi's site.unit_id
 ```
 
