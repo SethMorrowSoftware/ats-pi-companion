@@ -180,17 +180,17 @@ commissioning sign-off, exactly like the §5.2 watchdog registers.
 - ADAM-6060: static IP, recommend `192.168.1.251`, on the OT VLAN
 - Pi: static IP, recommend `192.168.1.250`, on the OT VLAN
 - Both reachable by the GenWatch Pi (typically also on OT VLAN)
-- Modbus TCP port 502 open between Pi and ADAM, and between Pi and
-  GenWatch Pi
+- Modbus TCP open: port 502 between the Pi and the ADAM (the ADAM's port),
+  and port 5020 between the GenWatch Pi and this Pi (the service's port)
 - NTP: both Pis sync against the same time source (router or one of
   the Pis serves NTP)
 
 ### 4.1 Network segmentation is a safety control (F3)
 
-The ATS-Pi runs a Modbus TCP **server** on port 502, and Modbus/TCP has **no
+The ATS-Pi runs a Modbus TCP **server** on port 5020, and Modbus/TCP has **no
 authentication** by design. The server does restrict writes to the four ICD
 command registers and enforces the `assumed_mode` policy, but anything that can
-*route to* port 502 on the Pi can drive Test / Inhibit / Force-Transfer /
+*route to* port 5020 on the Pi can drive Test / Inhibit / Force-Transfer /
 Bypass within that policy. For a deployment that *commands* a real switch, the
 network boundary is therefore a **safety control** and must be a deliberate,
 documented decision — not the incidental `0.0.0.0` dev default. Two layers:
@@ -199,23 +199,23 @@ documented decision — not the incidental `0.0.0.0` dev default. Two layers:
    `/etc/atspi/config.yaml` to the Pi's specific OT-VLAN IP (e.g.
    `192.168.1.250`), not `0.0.0.0`, so the server only listens on that segment.
 2. **Firewall allowlist.** On a dedicated OT VLAN, allow only:
-   - `GenWatch Pi → ats-pi:502` (inbound commands/reads), and
+   - `GenWatch Pi → ats-pi:5020` (inbound commands/reads), and
    - `ats-pi → ADAM:502` (outbound I/O).
 
-   Block everything else to `ats-pi:502`. Example host firewall on the Pi
+   Block everything else to `ats-pi:5020`. Example host firewall on the Pi
    (adapt to your tooling; `<genwatch-ip>` is the only permitted client):
 
    ```bash
-   # Allow the GenWatch Pi to reach the Modbus server; drop all other :502.
-   sudo iptables -A INPUT -p tcp --dport 502 -s <genwatch-ip> -j ACCEPT
-   sudo iptables -A INPUT -p tcp --dport 502 -j DROP
+   # Allow the GenWatch Pi to reach the Modbus server; drop all other :5020.
+   sudo iptables -A INPUT -p tcp --dport 5020 -s <genwatch-ip> -j ACCEPT
+   sudo iptables -A INPUT -p tcp --dport 5020 -j DROP
    ```
 
    The host firewall is the enforcement layer because pymodbus has no
    connection-source ACL — keep it in the commissioning runbook, not just in
    someone's head.
 
-**Acceptance:** from a host *off* the OT segment, `nmap -p 502 <ats-pi-ip>`
+**Acceptance:** from a host *off* the OT segment, `nmap -p 5020 <ats-pi-ip>`
 shows the port **filtered**; only the GenWatch Pi can reach it. Record this on
 the commissioning sign-off alongside the F1 cable-pull.
 
@@ -489,7 +489,7 @@ If any of steps 4-7 fail, see `docs/RUNBOOK.md`. Common gotchas:
 | `User/Group resolution: 'atspi' not found` | Skipped step 2 | `useradd` command above |
 | modpoll returns `[0, 1, 1, 0, 0, 0]` no matter what the ATS is doing | `driver: mock` still in config | Step 3 sed/nano |
 | All DIs read `0` / `position` stuck `unknown` / every `atspi-bench` DI step says "no bit change" | Wrong DI function code | Set `io.adam.di_read: discrete_inputs` (§3); confirm with `testadam.sh --di-read discrete_inputs` |
-| modpoll times out | Firewall on Pi (`iptables -L`) or wrong bind (`modbus_server.host`) | Allow GenWatch→502 in / Pi→ADAM:502 out (§4.1); confirm `modbus_server.host` is the OT-VLAN IP the client can reach |
+| modpoll times out | Firewall on Pi (`iptables -L`) or wrong bind (`modbus_server.host`) | Allow GenWatch→5020 in / Pi→ADAM:502 out (§4.1); confirm `modbus_server.host` is the OT-VLAN IP the client can reach |
 | Journal shows `sampling cycle failed (OSError): ADAM read_coils ... failed` then `sampling still failing` reminders | ADAM unreachable or wrong IP | `ping <io.adam.host>` from Pi; check Cat6 |
 
 ## 8. Safety reminders

@@ -69,7 +69,7 @@ python -m pytest tests/ -v
 python -m ruff check src/ tests/
 ```
 
-The suite (currently 209 tests) runs entirely without hardware — mock
+The suite (currently 266 tests) runs entirely without hardware — mock
 driver for the I/O layer, a fake pymodbus client for the ADAM driver,
 `tmp_path` for persistence. CI runs both jobs on every push plus a
 `soak` job that starts the real binary, performs a real Modbus read,
@@ -82,8 +82,8 @@ canonical defence against ICD drift on the ATS-Pi side.
 
 ## Manual integration testing against GenWatch
 
-1. Start the ATS-Pi with mock I/O on its standard port (502, or 5020
-   in dev to avoid root).
+1. Start the ATS-Pi with mock I/O on its default port (5020 — the
+   non-root service can't bind the privileged 502).
 2. In GenWatch's `/etc/genwatch/config.yaml`:
 
    ```yaml

@@ -57,7 +57,7 @@ def test_config_accepts_empty_file(tmp_path):
     p = tmp_path / "cfg.yaml"
     p.write_text("")
     cfg = load_config(p)
-    assert cfg.modbus_server.port == 502
+    assert cfg.modbus_server.port == 5020
     assert cfg.io.driver == "mock"
 
 

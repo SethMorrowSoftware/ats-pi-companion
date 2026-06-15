@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from pymodbus.client import AsyncModbusTcpClient
 from pymodbus.exceptions import ModbusException
 
-from .io_driver import InputSnapshot, OutputState
+from .io_driver import FAULT_CALIBRATION, InputSnapshot, OutputState
 
 log = logging.getLogger("atspi.io_adam")
 
@@ -367,6 +367,14 @@ class IOAdamDriver:
             # Both off (mid-stroke) or both on (impossible / fault)
             position = "unknown"
 
+        # ICD §5.1.1 CALIBRATION: both position-sense auxes (14AA + 14BA)
+        # asserted at once is physically impossible for a transfer switch — a
+        # welded or miswired aux contact — as distinct from the legitimate
+        # both-off mid-stroke. Flag it (off the debounced bits, so a transient
+        # can't raise it) so GenWatch can tell a sensor fault from a normal
+        # transition rather than seeing only a bare position=unknown.
+        fault_bits = FAULT_CALIBRATION if (on_normal and on_emerg) else 0
+
         return InputSnapshot(
             position=position,
             normal_available=bits[DI_NORMAL_AVAIL],
@@ -375,7 +383,7 @@ class IOAdamDriver:
             # No Auto/Manual sense contact on the ADAM-6060 — operator-asserted
             # via config (default "auto"). Also gates command writes (ICD §6).
             ats_mode=self._assumed_mode,
-            fault_bits=0,
+            fault_bits=fault_bits,
         )
 
     async def read_output_state(self) -> OutputState:
@@ -400,9 +408,11 @@ class IOAdamDriver:
         # nothing left to release it. A de-assert (inhibit/force_transfer=False)
         # is always the safe direction, so it is allowed through even here: this
         # is what lets the comms-loss safety watchdog and the bench cleanup path
-        # still drop relays. The orchestrator publishes the matching persistent
-        # OUTPUT_FAULT so GenWatch sees a non-authoritative link and refuses to
-        # command in the first place; this driver-level refusal is defence in depth.
+        # still drop relays. The orchestrator also publishes the matching
+        # persistent OUTPUT_FAULT, which GenWatch surfaces as a fault alarm — but
+        # this driver-level refusal is the enforcement that actually blocks the
+        # relay (GenWatch's authority gate keys on comms/version/unit_id, not
+        # fault bits, so it does not refuse commands on OUTPUT_FAULT alone).
         if not self._hw_watchdog_ok and (
             test_pulse_ms is not None
             or bool(inhibit)
@@ -485,7 +495,7 @@ class IOAdamDriver:
         """True when the ADAM hardware host-watchdog / DO safety-value fail-safe
         is verified armed (or the check is waived for bench work). While this is
         False the driver refuses to assert outputs and the sampling loop raises a
-        persistent OUTPUT_FAULT so GenWatch sees a non-authoritative link (F1).
+        persistent OUTPUT_FAULT, which GenWatch surfaces as a fault alarm (F1).
         """
         return self._hw_watchdog_ok
 

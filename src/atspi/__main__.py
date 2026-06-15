@@ -224,8 +224,9 @@ async def _amain(args: argparse.Namespace) -> int:
     if not connected:
         log.error("I/O driver failed to connect; will keep retrying in sampling loop")
     # F1: surface the hardware fail-safe self-check at startup. While it is not
-    # armed the driver refuses to assert outputs and the sampling loop publishes
-    # a persistent OUTPUT_FAULT (GenWatch then sees a non-authoritative link).
+    # armed the driver refuses to assert outputs (the enforcement that blocks
+    # the relay is local to this service) and the sampling loop publishes a
+    # persistent OUTPUT_FAULT, which GenWatch surfaces as a fault alarm.
     hw_ok, hw_detail = driver.hw_watchdog_status()
     if not hw_ok:
         log.error(
@@ -233,6 +234,16 @@ async def _amain(args: argparse.Namespace) -> int:
             "and a persistent OUTPUT_FAULT published until this is resolved. See "
             "HARDWARE.md §5.1 (cable-pull test).",
             hw_detail,
+        )
+    elif cfg.io.driver in ("adam", "hybrid") and not cfg.io.adam.require_hw_watchdog:
+        # The readback gate is waived (e.g. the ADAM-6060 can't expose its
+        # FSV/WDT over Modbus), so nothing in software verifies the fail-safe.
+        # Make the waiver loud rather than silent: F1 is now procedural.
+        log.warning(
+            "ADAM hardware fail-safe self-check is WAIVED (require_hw_watchdog: "
+            "false). F1 protection is PROCEDURAL — the §5.1 cable-pull test is "
+            "the only proof a latched relay releases on Pi death. Re-run it after "
+            "any ADAM swap or factory reset (HARDWARE.md §5.2).",
         )
 
     state_file = StateFile(cfg.persistence.state_file)

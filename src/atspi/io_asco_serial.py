@@ -53,7 +53,7 @@ from pymodbus.client import AsyncModbusSerialClient
 from pymodbus.exceptions import ModbusException
 
 from .io_adam import VALID_ASSUMED_MODES
-from .io_driver import InputSnapshot
+from .io_driver import FAULT_CALIBRATION, InputSnapshot
 
 log = logging.getLogger("atspi.io_asco_serial")
 
@@ -250,13 +250,19 @@ class AscoSerialReader:
             and _extract_bit(regs, cfg.engine_start_bit)
         )
 
+        # ICD §5.1.1 CALIBRATION: both on_normal and on_emergency set at once is
+        # a physically impossible contact combination (a welded/miswired status
+        # bit), distinct from the legitimate both-off mid-stroke — surface it so
+        # GenWatch sees a fault rather than only a bare position=unknown.
+        fault_bits = FAULT_CALIBRATION if (on_normal and on_emergency) else 0
+
         return InputSnapshot(
             position=position,
             normal_available=_extract_bit(regs, cfg.normal_available_bit),
             emergency_available=_extract_bit(regs, cfg.emergency_available_bit),
             engine_start_calling=engine_start,
             ats_mode=cfg.assumed_mode,
-            fault_bits=0,
+            fault_bits=fault_bits,
         )
 
     # ─── Internal: Modbus RTU access with implicit reconnect ─────────────

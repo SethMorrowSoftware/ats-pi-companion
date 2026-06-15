@@ -165,7 +165,8 @@ class LiveDataBlock(ModbusSequentialDataBlock):
             self._store.write_register(address - 1 + i, int(v))
 ```
 
-Bind to port 502 (configurable). Unit ID 1. No authentication (ICD §3).
+Bind to port 5020 (configurable; the privileged 502 needs root the service
+doesn't have). Unit ID 1. No authentication (ICD §3).
 
 ---
 
@@ -240,8 +241,9 @@ configured by hand, the driver **reads it back on connect and refuses to
 drive the switch unless it confirms the fail-safe is armed** (F1) —
 `io.adam.require_hw_watchdog`, default on; details in `docs/HARDWARE.md §5.2`.
 A failed/unverifiable check fails closed: outputs are refused (releases still
-allowed) and a persistent `OUTPUT_FAULT` is published so GenWatch's authority
-gate sees a non-authoritative link.
+allowed) and a persistent `OUTPUT_FAULT` is published. The refusal that blocks
+the relay is enforced *locally* by this driver; GenWatch surfaces the
+`OUTPUT_FAULT` as a fault alarm (it does not gate command authority on it).
 
 ---
 
@@ -291,7 +293,7 @@ YAML, loaded from `--config` flag. Example:
 ```yaml
 modbus_server:
   host: 0.0.0.0          # 0.0.0.0 = listen on all interfaces
-  port: 502
+  port: 5020             # high port: the non-root service can't bind 502
   unit_id: 1
 
 io:

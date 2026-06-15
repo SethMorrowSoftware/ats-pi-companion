@@ -9,6 +9,60 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 ## [Unreleased]
 
+### Fixed (commissioning plan — Modbus server port reconciled to 5020)
+
+- **Every doc, config default, and acceptance check now uses port `5020` for
+  the Modbus server GenWatch reads — not the privileged `502`.** The service
+  runs as the non-root `atspi` user with no `CAP_NET_BIND_SERVICE`, so it
+  cannot bind `502`; the production config already shipped `5020` and GenWatch's
+  client defaults to `5020`, but `TUTORIAL.md`, `NEXTSTEPS.md`, `HARDWARE.md`,
+  `SPEC.md`, `README.md`, the `config.example.yaml` / `config.py` dev defaults,
+  and the `nmap` / `modpoll` / firewall snippets still said `502`. A literal
+  follower either crash-looped the service (binding `502`) or pointed GenWatch
+  at a dead port (service on `5020`, client on `502`) — and three of the five
+  acceptance gates (ICD, §8.3, F3) couldn't close, with the `nmap -p 502` check
+  passing for the wrong reason. The ADAM-target `502` (the `io.adam.port`,
+  `atspi-bench` / `testadam.sh`, the `ats-pi → ADAM` firewall rule, the ADAM's
+  factory `10.0.0.1:502`) is unchanged — only the service-listen port moved.
+  `test_smoke.py` now asserts the `5020` default.
+
+### Added (safety-critical — CALIBRATION fault for impossible contact states)
+
+- **Both position-sense inputs asserted at once now sets `fault_summary` bit 3
+  (CALIBRATION, ICD §5.1.1).** A transfer switch cannot be on both sources at
+  once; `on_normal` and `on_emergency` both closed is a welded/miswired aux
+  contact (or status bit). Both real readers already collapsed that to
+  `position=unknown` — but with `fault_summary=0`, indistinguishable from a
+  legitimate both-off mid-stroke, so GenWatch got no diagnostic. The bit was
+  defined and plumbed end-to-end (mask, health decoder, store pass-through) but
+  **no code ever set it**; `io_adam` and `io_asco_serial` now raise it (off the
+  debounced / decoded bits, so a transient can't trip it) while still reporting
+  `position=unknown`. Covered by new tests in `test_io_adam.py` and
+  `test_io_hybrid.py`. The fault-bit constants moved to the I/O boundary
+  (`io_driver`) and are re-exported from `atspi.state` — no import changes for
+  existing consumers.
+
+### Changed (operability + doc accuracy)
+
+- **The F1 hardware-fail-safe waiver is now logged loudly at startup.** When
+  `require_hw_watchdog: false` on a real `adam` / `hybrid` driver (mandatory on
+  the ADAM-6060, which can't expose its FSV/WDT over Modbus), the readback gate
+  is silently waived — nothing in software verifies the fail-safe. Startup now
+  emits a WARNING that F1 is procedural and the §5.1 cable-pull is the only
+  proof, to be re-run after any ADAM swap or factory reset.
+- **Corrected the `OUTPUT_FAULT` → GenWatch overclaim.** `SPEC.md §5`,
+  `config.example.yaml`, and the `io_driver` / `__main__` docstrings said a
+  published `OUTPUT_FAULT` makes GenWatch "see a non-authoritative link and
+  refuse commands." GenWatch's authority gate keys only on comms health, ICD
+  *major* version, and `unit_id`; `fault_summary` bits are warn-only alarms.
+  The refusal that actually blocks the relay is enforced *locally* by this
+  driver — the docs now say so.
+- **`RUNBOOK.md §11` rollback** no longer `cd`s into a path `install.sh` never
+  creates, nor runs a system-wide `pip install`; it re-runs `install.sh` (the
+  documented idempotent upgrade/rollback path, matching the venv model).
+- **`README.md` test count** refreshed — the headline figure had drifted from
+  the actual suite.
+
 ### Added (`hybrid` driver — serial monitoring without 18RX / aux contacts)
 
 - **`driver: hybrid` reads ATS state from the ASCO Group 5 controller over
@@ -146,10 +200,10 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 - **Documented the Modbus TCP server's network boundary as a safety control.**
   Modbus/TCP has no authentication; the server whitelists the four command
-  registers and enforces mode policy, but anything that can route to port 502
+  registers and enforces mode policy, but anything that can route to port 5020
   can command within that policy. `config.example.yaml` and new `HARDWARE.md
   §4.1` now frame OT-VLAN segmentation + a firewall allowlist (only `GenWatch
-  Pi → ats-pi:502`, `ats-pi → ADAM:502`) and binding `modbus_server.host` to
+  Pi → ats-pi:5020`, `ats-pi → ADAM:502`) and binding `modbus_server.host` to
   the OT-side interface (not `0.0.0.0`) as a deliberate, documented control,
   with an `nmap`-filtered acceptance check. No transport auth is added (none
   exists in Modbus/TCP); enforcement is delegated to the host firewall.

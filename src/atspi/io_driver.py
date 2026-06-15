@@ -20,6 +20,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+# Fault-summary bit masks (ICD §5.1.1). Defined here at the I/O boundary
+# because drivers populate ``InputSnapshot.fault_bits``; re-exported from
+# ``atspi.state`` for the register store, Modbus server, and health decoder.
+FAULT_INPUT = 0x0001
+FAULT_OUTPUT = 0x0002
+FAULT_MODE_UNKNOWN = 0x0004
+FAULT_CALIBRATION = 0x0008
+
 
 @dataclass
 class InputSnapshot:
@@ -134,10 +142,12 @@ class IODriver(Protocol):
         """Whether the hardware host-watchdog fail-safe is verified armed (F1).
 
         For a real ADAM this reflects the connect-time readback of the host
-        watchdog / DO safety-value config; while it is False the driver refuses
-        to assert outputs and the sampling loop publishes a persistent
-        OUTPUT_FAULT (so GenWatch sees a non-authoritative link). Drivers with
-        no such fail-safe to verify (the mock) return True — nothing to gate.
+        watchdog / DO safety-value config; while it is False the driver itself
+        refuses to assert outputs (the enforcement that actually blocks the
+        relay is local to this service) and the sampling loop publishes a
+        persistent OUTPUT_FAULT, which GenWatch surfaces as a fault alarm.
+        Drivers with no such fail-safe to verify (the mock) return True —
+        nothing to gate.
         """
         ...
 

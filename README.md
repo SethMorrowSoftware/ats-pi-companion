@@ -21,7 +21,7 @@ block to GenWatch.
 ┌─────────────┐   dry      ┌─────────────┐   Modbus    ┌─────────────┐   Modbus    ┌──────────┐
 │  ASCO 300   │  contacts  │  ADAM-6060  │    TCP      │   ATS-Pi    │    TCP      │ GenWatch │
 │  Series 300 │ ◀────────▶ │   6 DI +    │ ◀─────────▶ │   service   │ ◀─────────▶ │  Pi      │
-│  ATS        │  18RX,     │   6 relay   │  192.168.   │  (this proj)│  port 502   │ dashboard│
+│  ATS        │  18RX,     │   6 relay   │  192.168.   │  (this proj)│  port 5020  │ dashboard│
 │  Group 5    │  14AA/14BA │   DO        │  x.251      │             │             │          │
 └─────────────┘  test/     └─────────────┘             └─────────────┘             └──────────┘
                  inhibit/
@@ -57,7 +57,7 @@ write semantics, and safety guarantee:
 → [`GenWatch/docs/integrations/ats-pi-icd.md`](https://github.com/SethMorrowSoftware/GenWatch/blob/main/docs/integrations/ats-pi-icd.md)
 
 Conformance is verified end-to-end in `tests/test_icd_contract.py`
-(44 tests against a real pymodbus client driving the real server).
+(47 tests against a real pymodbus client driving the real server).
 Two documented deviations (Modbus exception codes 0x02 vs ICD's
 0x03/0x04) are explained in `CHANGELOG.md`.
 
@@ -73,7 +73,7 @@ cp config.example.yaml config.yaml      # defaults to driver: mock
 atspi --config config.yaml
 
 # In another shell:
-modpoll -m tcp -a 1 -r 1 -c 6 127.0.0.1
+modpoll -m tcp -p 5020 -a 1 -r 1 -c 6 127.0.0.1
 # → [0, 1, 1, 0, 0, 0]  (utility, both sources available, auto, no faults)
 ```
 
@@ -143,7 +143,7 @@ docs/
   DEVELOPMENT.md     dev environment, mock controls, test layout
   RUNBOOK.md         field troubleshooting
 
-tests/               209 tests, ruff-clean, CI on every PR
+tests/               266 tests, ruff-clean, CI on every PR
 systemd/atspi.service production unit (Type=notify, WatchdogSec=60)
 ```
 

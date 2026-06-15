@@ -22,7 +22,10 @@ class ConfigError(ValueError):
 @dataclass
 class ModbusServerCfg:
     host: str = "0.0.0.0"
-    port: int = 502
+    # High port, NOT the privileged Modbus 502: the service runs as the non-root
+    # `atspi` user (no CAP_NET_BIND_SERVICE) and cannot bind 502. GenWatch's
+    # ats.port defaults to 5020 to match. See config.example.yaml / HARDWARE §4.1.
+    port: int = 5020
     unit_id: int = 1
 
 

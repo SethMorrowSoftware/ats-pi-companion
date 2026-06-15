@@ -773,3 +773,44 @@ async def test_hw_watchdog_rechecks_on_reconnect():
     d._client.holding_registers[_WD_ENABLE_REG] = 0  # noqa: SLF001
     await d.connect()
     assert d.hw_watchdog_ok() is False
+
+
+# ─── CALIBRATION fault: impossible contact combination (ICD §5.1.1) ──────────
+
+
+async def test_both_position_auxes_set_flags_calibration(driver):
+    """Both position auxes (14AA on-normal + 14BA on-emergency) closed at once
+    is physically impossible for a transfer switch — a welded or miswired aux.
+    The snapshot must raise CALIBRATION (ICD §5.1.1) so GenWatch can tell a
+    sensor fault from a normal mid-stroke, not just a bare position=unknown.
+    """
+    from atspi.io_driver import FAULT_CALIBRATION
+
+    fake = driver._client  # noqa: SLF001
+    fake.di_bits[DI_ON_NORMAL] = True
+    fake.di_bits[DI_ON_EMERGENCY] = True
+    snap = await driver.read_inputs()
+    assert snap.position == "unknown"
+    assert snap.fault_bits & FAULT_CALIBRATION
+
+
+async def test_both_position_auxes_open_is_not_calibration(driver):
+    """Both auxes open is a legitimate mid-stroke: position=unknown but NO
+    CALIBRATION fault (the bit is reserved for the impossible both-closed case).
+    """
+    from atspi.io_driver import FAULT_CALIBRATION
+
+    snap = await driver.read_inputs()  # all di_bits default False
+    assert snap.position == "unknown"
+    assert not (snap.fault_bits & FAULT_CALIBRATION)
+
+
+async def test_single_position_aux_is_not_calibration(driver):
+    """A normal single-source position carries no CALIBRATION bit."""
+    from atspi.io_driver import FAULT_CALIBRATION
+
+    fake = driver._client  # noqa: SLF001
+    fake.di_bits[DI_ON_EMERGENCY] = True
+    snap = await driver.read_inputs()
+    assert snap.position == "generator"
+    assert not (snap.fault_bits & FAULT_CALIBRATION)
