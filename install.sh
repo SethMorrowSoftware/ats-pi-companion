@@ -51,6 +51,20 @@ else
   useradd --system --no-create-home --shell /usr/sbin/nologin -g "$ATSPI_USER" "$ATSPI_USER"
 fi
 
+# Serial-device access for driver: hybrid (USB-RS485 → ASCO Group 5). The
+# non-root service can't open /dev/ttyUSB0 without 'dialout'. Harmless for
+# driver: adam (TCP-only); the systemd unit also sets SupplementaryGroups=dialout.
+if getent group dialout >/dev/null; then
+  if id -nG "$ATSPI_USER" | tr ' ' '\n' | grep -qx dialout; then
+    say "Service user '$ATSPI_USER' already in 'dialout' (serial access)"
+  else
+    say "Adding '$ATSPI_USER' to 'dialout' (serial access for driver: hybrid)"
+    usermod -aG dialout "$ATSPI_USER"
+  fi
+else
+  warn "group 'dialout' not found — for driver: hybrid, grant the service serial access manually"
+fi
+
 # ── 3. Virtualenv + package ──────────────────────────────────────────────────
 say "Creating/updating virtualenv at $VENV_DIR"
 mkdir -p "$(dirname "$VENV_DIR")"
@@ -75,7 +89,8 @@ if [ -f "$CONFIG_FILE" ]; then
 else
   say "Installing default config to $CONFIG_FILE"
   install -m 0640 -o root -g "$ATSPI_USER" "$REPO_DIR/config.example.yaml" "$CONFIG_FILE"
-  warn "Edit $CONFIG_FILE before starting: set io.driver=adam, io.adam.host, site.unit_id"
+  warn "Edit $CONFIG_FILE before starting: set io.driver (adam|hybrid), io.adam.host, site.unit_id"
+  warn "  driver: hybrid also needs io.asco_serial (port, baud, status_register + bits) — see HARDWARE.md §3.1"
 fi
 
 # ── 5. systemd unit (ExecStart → the venv binary) ────────────────────────────
@@ -91,10 +106,12 @@ cat <<EOF
 Finish commissioning before enabling the service:
 
   1. Edit the config:         sudo nano $CONFIG_FILE
-       - io.driver: adam
+       - io.driver: adam (contact-only) | hybrid (ADAM control + ASCO Group 5
+         over USB-RS485; also set io.asco_serial — HARDWARE.md §3.1)
        - io.adam.host: <ADAM-6060 IP>
        - site.unit_id: <GenWatch expected_unit_id>
   2. Bench-verify the ADAM:   sudo $REPO_DIR/testadam.sh
+       hybrid: also bench-verify the serial Group 5 map (HARDWARE.md §3.1)
   3. Enable + start on boot:  sudo systemctl enable --now atspi
   4. Watch it come up:        systemctl status atspi
                               journalctl -u atspi -f

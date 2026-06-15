@@ -112,24 +112,51 @@ four DO pairs (terminals 6-13) and the serial cable.
 
 ### BOM delta vs §1
 
-- **USB-to-RS485 adapter** (~$12), e.g. an FTDI-based dongle. Confirm
-  **2-wire vs 4-wire** and the **DB9 pinout** against the controller's
-  wiring — see below.
+- **USB-to-RS485 adapter** (~$12), e.g. a Waveshare "USB TO RS485" or an
+  FTDI-based dongle. Most use an FTDI (`ftdi_sio`) or CH340/CH343
+  (`ch341`/`ch34x`) chip — both in-tree on current Raspberry Pi OS, so the
+  adapter enumerates with no extra driver (see "Bring the link up" below).
+  Confirm **2-wire vs 4-wire** and the terminal/DB9 pinout against the
+  controller's wiring — see below.
 - *Not needed:* 18RX (item 7), 14AA/14BA (item 8).
 
 ### Wiring & controller setup
 
-1. **Connector.** Your unit has a DB9 on the bottom of the Group 5 controller.
-   ASCO comms is **RS-485** (some vintages present it on the DB9, others on a
-   `Y Z B A 24 GND` terminal block for 4-wire full-duplex). **Confirm the DB9
-   pinout and whether it's 2-wire or 4-wire** from ASCO operator's manual
-   `381333-289` and the Modbus doc `381339-221` before wiring the adapter —
-   RS-485 is differential (A/B + signal ground), *not* RS-232, so a straight
-   PC serial cable will not work.
+1. **Connector + RS-485 wiring.** The Group 5 controller presents RS-485
+   (differential **A/B + signal ground**, *not* RS-232 — a straight PC serial
+   cable will not work). Some vintages put it on a DB9, others on a
+   `Y Z B A 24 GND` terminal block. **Confirm the pinout and whether it's
+   2-wire (half-duplex) or 4-wire (full-duplex)** from ASCO operator's manual
+   `381333-289` and the Modbus doc `381339-221` before wiring.
+   - Land the adapter's **A / A+ (D+)** and **B / B− (D−)** to the controller's
+     matching A/B (a 2-wire adapter on a 4-wire `Y Z B A` block: tie A↔A and
+     B↔B for half-duplex; leave Y/Z per the manual), plus **signal ground** to
+     the controller's GND.
+   - **If the link is silent, swap A and B first** — a reversed differential
+     pair is the single most common RS-485 fault and harms nothing to try.
+   - On a long cabinet run, enable the adapter's **120 Ω end-of-line
+     termination** (a jumper/switch on most Waveshare units) and the
+     controller's if provided; a short bench run usually needs neither.
 2. **Controller front panel:** General → Communication (RS485 port). Set a
-   **slave address** (1-247) and **baud**; the framing is fixed at **8N1, RTU**.
-   Match these in config.
-3. The Pi sees the adapter as e.g. `/dev/ttyUSB0` (`io.asco_serial.port`).
+   **slave address** (1-247 → `io.asco_serial.unit_id`) and **baud**
+   (→ `baudrate`); framing is fixed at **8N1, RTU**. Match these in config.
+3. **Bring the link up on the Pi.** Plug the adapter in and confirm the device
+   node — the config default `/dev/ttyUSB0` is only a guess:
+   ```bash
+   lsusb                              # identify the chip (FTDI / CH340 / CH343)
+   dmesg | grep -iE 'ttyUSB|ttyACM'   # which node it attached to
+   # or: ls -l /dev/ttyUSB* /dev/ttyACM*
+   ```
+   FTDI/CH34x adapters normally appear as `ttyUSB0`; a CDC-ACM adapter as
+   `ttyACM0`. Set `io.asco_serial.port` to whatever actually appears. To
+   bench-verify with `modpoll`/`mbpoll` below, install it: `sudo apt install mbpoll`.
+4. **Service-user serial access.** The service runs as the non-root `atspi`
+   user, which must be in the **`dialout`** group to open the port. `install.sh`
+   adds it and the systemd unit sets `SupplementaryGroups=dialout`; if you wired
+   the service by hand, run `sudo usermod -aG dialout atspi`. **Without this the
+   service can't open the port** — bench `modpoll` as root still works, so it
+   fails silently only once deployed (`journalctl -u atspi` shows
+   `ASCO serial open … failed`).
 
 ### Config
 
@@ -149,7 +176,10 @@ io:
     on_emergency_bit: ?
     normal_available_bit: ?
     emergency_available_bit: ?
-    # transferring_bit / engine_start_bit are optional
+    # transferring_bit / engine_start_bit optional — but if transferring_bit is
+    # unset, position reads 'unknown' for the whole transfer stroke (never
+    # 'transferring'); if engine_start_bit is unset, engine_start_calling is
+    # always 0 (GenWatch never sees engine-start over the serial path).
 ```
 
 > The hybrid driver **refuses to start** until `status_register` and the four

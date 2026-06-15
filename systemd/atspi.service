@@ -21,6 +21,13 @@ TimeoutStartSec=30
 User=atspi
 Group=atspi
 
+# Serial-device access for driver: hybrid — the hybrid driver reads the ASCO
+# Group 5 controller over a USB-RS485 adapter (/dev/ttyUSB0), and the non-root
+# atspi user must be in 'dialout' to open it. Without this the serial read fails
+# with EACCES and the monitoring half silently never comes up. Harmless / no-op
+# for driver: adam (TCP-only). install.sh also adds atspi to dialout.
+SupplementaryGroups=dialout
+
 # StateDirectory= auto-creates /var/lib/atspi (mode 0750, owned by User/Group)
 # on first start. No manual chown needed; survives uninstall/reinstall cycles.
 StateDirectory=atspi
