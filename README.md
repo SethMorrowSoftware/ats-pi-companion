@@ -30,6 +30,14 @@ block to GenWatch.
 
 ## Scope
 
+Two production I/O paths read the same ATS state (the ADAM always drives
+the four command relays either way): `driver: adam` is contact-only and
+needs the **18RX + 14AA/14BA** accessories so the ADAM's DIs can sense
+position and source availability; `driver: hybrid` instead reads those
+facts from the **ASCO Group 5 controller over RS-485** via a USB-RS485
+adapter, so **no 18RX/aux accessories are needed** and the ADAM DIs go
+unused. See [`docs/HARDWARE.md §3.1`](./docs/HARDWARE.md) to choose.
+
 **This project does:**
 
 - Read the ASCO's dry contacts (source availability, switch position,

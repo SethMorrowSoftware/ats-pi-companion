@@ -19,8 +19,18 @@ Deep reference is [`HARDWARE.md`](./HARDWARE.md); you should not need it.
 
 ## What you're landing
 
+> **⚠️ Which input path? Confirm with the integrator before Step 3.** This card's
+> INPUT wiring (**Step 3**) and DI read-verify (**Step 6**) are for the
+> **contact-only** path (`driver: adam`): six dry contacts from the 18RX +
+> 14AA/14BA accessories. If this site uses the **hybrid** path
+> (`driver: hybrid`), those accessories are **not** installed and the ADAM DIs
+> are unused — the input side is a **single USB-RS485 cable** from the ASCO
+> Group 5 controller. Do **Step 3-H** instead of Step 3, and verify reads over
+> serial (see the Step 6 note). **Power (1), network (2), OUTPUT wiring (4), and
+> re-energize (5) are identical either way.**
+
 A small enclosure (Raspberry Pi + **ADAM-6060** I/O module + 24 VDC PSU) beside
-the ATS. Ten signal wires total, plus power and two network drops:
+the ATS. Ten signal wires total (contact path), plus power and two network drops:
 
 ```
    ASCO 300                 ADAM-6060                  (network)
@@ -36,6 +46,10 @@ the ATS. Ten signal wires total, plus power and two network drops:
                          │ PSU  │◀── 120 VAC
                          └──────┘
 ```
+
+*(**Hybrid path:** the six dry-contact inputs above are replaced by one
+USB-RS485 cable from the Group 5 controller to the Pi — see **Step 3-H**. The
+output relays and everything else are unchanged.)*
 
 ## Materials / tools
 
@@ -81,6 +95,24 @@ to the H-100**, not a spare dry contact. **Meter it first** — if you read a
 voltage, it is NOT a dry contact: **STOP and call the integrator.** Do not
 disturb the existing engine-start wire.
 
+## Step 3-H — INPUT for the hybrid path (RS-485 serial — instead of Step 3)
+
+On the **hybrid** path there are **no** 18RX / 14AA / 14BA contacts and the ADAM
+DIs are unused. Land **one** serial run instead of the six DI wires above:
+
+- [ ] **USB-RS485 adapter** into the Pi's USB. (Integrator confirms which
+      `/dev/ttyUSBx` it becomes.)
+- [ ] **RS-485 from the ASCO Group 5 controller** to the adapter: **A ↔ A**,
+      **B ↔ B**, plus **signal ground** — a differential pair, *not* RS-232, so
+      a straight PC serial cable will not work. The controller's port is a DB9
+      or a `Y Z B A 24 GND` block; **confirm the pinout against `381339-221`**
+      for THIS unit before landing.
+- [ ] If the link is dead, **swap A and B** first (the most common RS-485
+      fault). On a long cabinet run, enable the adapter's **120 Ω termination**.
+
+🔴 The Group 5 register/bit map and the controller's RS-485 address/baud are the
+**integrator's** bench-verified settings — you only land the cable.
+
 ## Step 4 — OUTPUT wires: ADAM relays → ASCO command inputs
 
 > 🏷️ **Label check — "RL" *is* the output.** The ADAM silkscreens these
@@ -111,6 +143,12 @@ channel has three terminals — COM/NO/NC — use **COM + NO**).
 ---
 
 ## Step 6 — VERIFY READS (commissioning tech, before ANY relay is driven)
+
+> **Hybrid path:** the DI table below is for the contact-only path — the ADAM
+> DIs aren't used. The tech instead confirms the **serial** read: that
+> `position` / availability / engine-start track the real switch over the Group
+> 5 link (`HARDWARE.md §3.1`), then goes straight to Step 7 (the OUTPUT side is
+> the same).
 
 Read-side first. From the Pi (`<ADAM-IP>` = the ADAM's address):
 

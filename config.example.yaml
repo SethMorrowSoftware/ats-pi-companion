@@ -162,8 +162,12 @@ io:
     #   on_emergency_bit: 1              # load is on the Emergency (generator) source
     #   normal_available_bit: 2          # Normal source available
     #   emergency_available_bit: 3       # Emergency source available
-    #   transferring_bit: 4              # optional: transfer in progress
-    #   engine_start_bit: 5              # optional: engine-start asserted
+    #   transferring_bit: 4              # optional: transfer in progress. If unset,
+    #                                    #   position reads 'unknown' for the whole
+    #                                    #   transfer stroke (never 'transferring').
+    #   engine_start_bit: 5              # optional: engine-start asserted. If unset,
+    #                                    #   engine_start_calling is always 0 — GenWatch
+    #                                    #   never sees engine-start over the serial path.
 
 # ─── Site identification ──────────────────────────────────────────────────
 # Reported via the ats_pi_unit_id register (ICD §5.4). GenWatch's

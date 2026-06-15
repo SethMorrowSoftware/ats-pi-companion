@@ -27,6 +27,7 @@ ATS-Pi OT IP   : ______________      ADAM OT IP : ______________
 GenWatch IP    : ______________
 modbus_server.port : __________  ==  GenWatch ats.port : __________
 site.unit_id       : __________  ==  GenWatch expected_unit_id : __________
+io.driver          : adam | hybrid : __________
 io.adam.di_read    : coils       io.adam.require_hw_watchdog : false   (6060)
 ```
 
@@ -57,11 +58,17 @@ DO power-on values → OFF                 : ☐
 - [ ] Assert **Inhibit from GenWatch** → confirm DO2 energized
 - [ ] **Stop GenWatch** → relay **released within ~30 s** (`auto-releasing … per ICD §8.3` in the journal)
 
-## Read verification — each DI against the REAL switch
+## Read verification — against the REAL switch
 
+**Contact path (`driver: adam`)** — each DI against the real switch:
 - [ ] DI0 Test pulse   - [ ] DI1 on-normal   - [ ] DI2 on-emergency
 - [ ] DI3 utility-available   - [ ] DI4 gen-available   - [ ] DI5 engine-start
 - [ ] **Contact sense reconciled** (bench `open=1` vs the real NO/NC rest states)
+
+**Hybrid path (`driver: hybrid`)** — the serial Group 5 read tracks the switch:
+- [ ] `position` follows the real switch (utility / generator / transferring)
+- [ ] `normal_available` / `emergency_available` track the real sources
+- [ ] engine-start reads correctly (or `engine_start_bit` deliberately unset)
 
 ## Command verification — planned outage
 
@@ -73,6 +80,15 @@ DO power-on values → OFF                 : ☐
 ADAM static IP : ____________   host-idle timeout : ______ s
 all DO FSV → OFF : ☐    power-on values OFF : ☐    di_read : coils
 ```
+
+## Serial monitoring record — hybrid only (`io.asco_serial`, bench-verified per 381339-221)
+
+```
+serial device   : /dev/tty________    controller RS485 addr : ______   baud : ______
+status_register : 0x______   count : ____
+bits  on_normal:__  on_emergency:__  normal_avail:__  emergency_avail:__   (transferring:__  engine_start:__)
+```
+- [ ] Group 5 register/bit map **bench-verified** against `381339-221` and recorded above
 
 ---
 

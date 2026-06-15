@@ -6,6 +6,18 @@ the desk, jumper wires and a multimeter. It complements
 [`HARDWARE.md`](./HARDWARE.md), which assumes the switch is already wired;
 this one starts from "the module just arrived in the box."
 
+> **Scope: this doc validates the ADAM (control) half only.** For
+> `driver: adam` that is the whole I/O path, and §4–§12 below cover it. For
+> **`driver: hybrid`** the ADAM still drives the relays (so §7 relays, §9
+> comms-loss, and §10 FSV/cable-pull apply unchanged), but switch position,
+> source availability, and engine-start are read from the **ASCO Group 5
+> controller over RS-485**, *not* from the ADAM DIs. The DI checks in §5,
+> §6, and §8 exercise only the ADAM read path, which **hybrid does not use
+> for monitoring** — so on a hybrid build you must **also** bench-verify the
+> ASCO serial read path (`io.asco_serial` + its register map) per
+> [`HARDWARE.md §3.1`](./HARDWARE.md). The §12 checklist has a hybrid row
+> for it.
+
 The goal is to prove, in order:
 
 1. the Pi can reach the ADAM over Modbus,
@@ -91,6 +103,10 @@ Press `Ctrl-C` at the first DI prompt if you only wanted the snapshot.
 
 ## 5. Confirm `di_read` (coils vs discrete_inputs)
 
+> **adam driver only** — in hybrid the DIs are unused, so this proves
+> nothing about the served state (which comes from the serial path). Skip
+> on a hybrid bench and verify `io.asco_serial` instead (HARDWARE.md §3.1).
+
 The one setting that must be confirmed per unit: do the DIs answer on
 `coils` (FC01) or `discrete_inputs` (FC02)?
 
@@ -104,6 +120,9 @@ The DIs are **dry-contact**: an open input reads **1**, shorting the channel
 to its DI-common/GND reads **0**. Un-wired DIs sit at `1`.
 
 ## 6. Verify the DIs (jumper technique)
+
+> **adam driver only** — in hybrid the DIs are unused and these jumper
+> checks prove nothing about the served state.
 
 There's no ASCO, so you simulate each contact with a jumper. Run the
 walkthrough and, at each DI prompt, bridge that channel to its DI common,
@@ -226,10 +245,19 @@ Jumper **DI3** (normal source available), wait ~1 s (debounce), re-run:
 `normal_available` flips **`1 → 0`**. Remove the jumper → back to `1`. That
 is the whole chain: contact → driver → register store → served register.
 
-> **Expected on a bare bench:** `position` reads **`transferring`**, not
-> `unknown`. DI0 (Load Disconnect) floats to `1` (open), and the driver
-> reads DI0=`1` as "transfer in progress," so it holds `transferring` while
-> nothing is wired. Not a fault. `fault_summary: 0` is what you want.
+> **adam driver only** — DI3 → `normal_available` is the ADAM read path. In
+> hybrid the DIs are unused and this proves nothing about the served state;
+> there `normal_available` is derived from the serial `normal_available_bit`,
+> bench-verified per HARDWARE.md §3.1.
+
+> **Expected on a bare bench (adam path only):** `position` reads
+> **`transferring`**, not `unknown`. DI0 (Load Disconnect) floats to `1`
+> (open), and the `adam` driver reads DI0=`1` as "transfer in progress," so
+> it holds `transferring` while nothing is wired. Not a fault.
+> `fault_summary: 0` is what you want. **This is specific to the ADAM DI
+> read** — the hybrid serial reader derives position from the
+> `on_normal`/`on_emergency` bits, so a bare serial bench with the switch
+> sitting on utility reads **`utility`**, not `transferring`.
 
 ## 9. Safety auto-release (comms-loss watchdog, ICD §8.3)
 
@@ -364,7 +392,7 @@ commissioning sign-off** (`HARDWARE.md §9`); it is the F1 acceptance gate.
 | 2 | **No per-channel I/O LEDs** — confirm relays by Modbus read-back + a meter, not lights. |
 | 3 | The **web UI is a Java applet** — dead on modern browsers. Use the .NET Utility for config. |
 | 4 | **FSV / Communication WDT / host-idle-time are not Modbus-exposed.** `io.adam.require_hw_watchdog` cannot be used on the 6060 — keep it **`false`** and verify the fail-safe with the §10 cable-pull test. |
-| 5 | On a bare bench, `position` reads **`transferring`** (DI0 floats high = "Load Disconnect asserted"); expected, not a fault. |
+| 5 | **adam path only:** on a bare bench `position` reads **`transferring`** (DI0 floats high = "Load Disconnect asserted"); expected, not a fault. The hybrid serial reader derives position from the `on_normal`/`on_emergency` bits, so a bare serial bench with the switch on utility reads **`utility`**, not `transferring`. |
 
 ## 12. Bench sign-off checklist
 
@@ -373,6 +401,9 @@ commissioning sign-off** (`HARDWARE.md §9`); it is the F1 acceptance gate.
 - [ ] §6 all 6 DIs track their jumper, correct channel
 - [ ] §7 all 6 relays drive + read back; all rest at `0` after power-cycle
 - [ ] §8 service starts clean on `driver: adam`; DI jumper → served register
+- [ ] **hybrid only:** serial link up + Group 5 map bench-verified
+      (HARDWARE §3.1) — served position/availability tracks the switch over
+      the serial path (the ADAM DI checks above don't cover this)
 - [ ] §9 comms-loss auto-release drops the relay at ~30 s
 - [ ] §10 FSV configured (Windows utility) **and cable-pull verified** —
       *deferred to commissioning; the bench proves everything else*
