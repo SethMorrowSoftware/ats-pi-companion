@@ -125,6 +125,8 @@ src/atspi/
   io_driver.py       abstract I/O Protocol
   io_mock.py         dev/test driver with SIGUSR1/2 controls
   io_adam.py         Advantech ADAM-6060 driver
+  io_asco_serial.py  ASCO Group 5 reader over RS-485 Modbus RTU (monitoring)
+  io_hybrid.py       serial monitoring + ADAM control (no 18RX/aux contacts)
   bench.py           `atspi-bench` interactive commissioning CLI
   persistence.py     atomic-rename JSON state file
   health.py          optional localhost JSON /health endpoint

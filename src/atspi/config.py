@@ -74,9 +74,46 @@ class AdamCfg:
 
 
 @dataclass
+class AscoSerialCfg:
+    """ASCO Group 5 RS-485 Modbus RTU reader config (used when driver: hybrid).
+
+    Serial link params + the Group 5 holding-register / bit map that the
+    ``hybrid`` driver reads position and source availability from, in place of
+    the 18RX / 14AA-14BA accessories. Bit indices are flat across the read
+    block (bit b → register status_register + b//16, bit b%16). The status
+    register and the four required bits are BENCH-VERIFY from ASCO doc
+    381339-221 and default to unset — the hybrid driver refuses to start until
+    they are supplied (io_asco_serial.AscoSerialConfig.validate). See
+    HARDWARE.md §3.1.
+    """
+    port: str = "/dev/ttyUSB0"
+    baudrate: int = 19200
+    bytesize: int = 8
+    parity: str = "N"
+    stopbits: int = 1
+    unit_id: int = 1  # controller RS485 address (1-247)
+    timeout_s: float = 1.0
+    # ATS mode reported in the snapshot / command gate (ICD §6); same semantics
+    # as io.adam.assumed_mode. One of: auto|manual|test|unknown.
+    assumed_mode: str = "auto"
+    # Group 5 holding-register status map (FC03). PDU offsets / flat bit indices.
+    status_register: int | None = None
+    status_register_count: int = 1
+    on_normal_bit: int | None = None
+    on_emergency_bit: int | None = None
+    normal_available_bit: int | None = None
+    emergency_available_bit: int | None = None
+    transferring_bit: int | None = None
+    engine_start_bit: int | None = None
+
+
+@dataclass
 class IOCfg:
-    driver: str = "mock"  # 'mock' | 'adam'
+    driver: str = "mock"  # 'mock' | 'adam' | 'hybrid'
     adam: AdamCfg = field(default_factory=AdamCfg)
+    # Used when driver: hybrid (serial monitoring + ADAM control). The output
+    # side still reads io.adam.* — only the input path comes from io.asco_serial.
+    asco_serial: AscoSerialCfg = field(default_factory=AscoSerialCfg)
 
 
 @dataclass
