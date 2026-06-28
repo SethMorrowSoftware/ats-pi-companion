@@ -265,6 +265,59 @@ def test_no_warning_when_site_unit_id_is_configured(caplog):
     assert not any("site.unit_id" in r.getMessage() for r in caplog.records)
 
 
+# ─── H-1: F1 fail-safe waiver requires an explicit second acknowledgement ─────
+
+
+def test_waiver_without_ack_refuses_to_start():
+    """require_hw_watchdog: false with no i_understand_no_crash_backstop ack
+    must hard-fail: a one-line waiver should not silently remove the last
+    crash-time backstop on the switch-command device.
+    """
+    import pytest
+
+    from atspi.__main__ import _enforce_hw_watchdog_waiver
+    from atspi.config import Config, ConfigError
+
+    cfg = Config()
+    cfg.io.driver = "adam"
+    cfg.io.adam.require_hw_watchdog = False
+    cfg.io.adam.i_understand_no_crash_backstop = False
+    with pytest.raises(ConfigError, match="i_understand_no_crash_backstop"):
+        _enforce_hw_watchdog_waiver(cfg)
+
+
+def test_waiver_with_ack_starts():
+    """The waiver is permitted once the operator sets the explicit ack key."""
+    from atspi.__main__ import _enforce_hw_watchdog_waiver
+    from atspi.config import Config
+
+    cfg = Config()
+    cfg.io.driver = "adam"
+    cfg.io.adam.require_hw_watchdog = False
+    cfg.io.adam.i_understand_no_crash_backstop = True
+    _enforce_hw_watchdog_waiver(cfg)  # must not raise
+
+
+def test_default_require_hw_watchdog_needs_no_ack():
+    """The safe default (require_hw_watchdog: true) never needs the ack, and
+    the mock driver is exempt regardless.
+    """
+    from atspi.__main__ import _enforce_hw_watchdog_waiver
+    from atspi.config import Config
+
+    cfg = Config()  # driver=mock, require_hw_watchdog=True
+    _enforce_hw_watchdog_waiver(cfg)
+
+    cfg.io.driver = "hybrid"  # require_hw_watchdog still True
+    _enforce_hw_watchdog_waiver(cfg)
+
+    cfg2 = Config()
+    cfg2.io.driver = "mock"
+    cfg2.io.adam.require_hw_watchdog = False  # mock is exempt
+    cfg2.io.adam.i_understand_no_crash_backstop = False
+    _enforce_hw_watchdog_waiver(cfg2)
+
+
 # ─── ICD §9.3: reset-on-reboot output release ────────────────────────────────
 
 
@@ -340,6 +393,74 @@ async def test_sampling_loop_retries_startup_release_until_it_lands(monkeypatch)
 
 
 # ─── Sampling-loop failure-log throttling ────────────────────────────────────
+
+
+async def test_sense_failure_latches_input_fault_and_serves_last_good_position(monkeypatch):
+    """ICD §10 "reachable but blind": when the input/sense read fails (e.g. the
+    Group-5 RS-485 link drops) while the Modbus TCP server stays up, the
+    producer MUST (a) latch INPUT_FAULT in fault_summary AND (b) keep serving
+    its last-good position over the wire — not zeros, not 'unknown'. GenWatch
+    then drops the ATS-Pi as authoritative. This pins the producer half that a
+    regression (clearing the fault, or publishing a default snapshot in the
+    except branch) would silently break.
+    """
+    from atspi import __main__ as main_mod
+    from atspi.io_driver import InputSnapshot, OutputState
+    from atspi.state import (
+        ADDR_FAULT_SUMMARY,
+        ADDR_POSITION,
+        FAULT_INPUT,
+        RegisterStore,
+    )
+
+    monkeypatch.setattr(main_mod, "SAMPLE_INTERVAL_S", 0.01)
+
+    class Driver:
+        fail = False
+
+        async def read_inputs(self):
+            if self.fail:
+                raise OSError("Group-5 RS-485 read failed: TimeoutError")
+            return InputSnapshot(
+                position="generator", normal_available=False, emergency_available=True,
+                engine_start_calling=True, ats_mode="auto", fault_bits=0,
+            )
+
+        async def read_output_state(self):
+            return OutputState(False, False, False, False)
+
+        async def release_all_outputs(self):
+            pass
+
+        def check_output_consistency(self, _actual):
+            return True
+
+        def hw_watchdog_ok(self):
+            return True
+
+    driver = Driver()
+    store = RegisterStore()
+    task = asyncio.create_task(main_mod._sampling_loop(driver, store))
+    try:
+        # First, a few healthy cycles establish position=generator (=1).
+        await asyncio.sleep(0.05)
+        assert store.read_register(ADDR_POSITION) == 1
+        assert not (store.read_register(ADDR_FAULT_SUMMARY) & FAULT_INPUT)
+
+        # Now the sense link drops while the server keeps running.
+        driver.fail = True
+        await asyncio.sleep(0.1)  # ~10 failing cycles
+
+        # INPUT_FAULT is latched...
+        assert store.read_register(ADDR_FAULT_SUMMARY) & FAULT_INPUT, "INPUT_FAULT not set"
+        # ...and the last-good position is still served (not 0/utility, not unknown).
+        assert store.read_register(ADDR_POSITION) == 1, "last-good position not preserved"
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 async def test_sampling_loop_throttles_repeated_failure_logs(caplog, monkeypatch):

@@ -13,7 +13,7 @@ import sys
 import time
 
 from . import __version__
-from .config import load_config
+from .config import ConfigError, load_config
 from .io_driver import IODriver
 from .io_mock import IOMockDriver
 from .notify import ready as notify_ready
@@ -42,6 +42,31 @@ log = logging.getLogger("atspi")
 # reports 1 and GenWatch refuses authority — which surfaces as a confusing
 # "authority refused" rather than an obvious misconfiguration.
 _DEFAULT_SITE_UNIT_ID = 1
+
+
+def _enforce_hw_watchdog_waiver(cfg) -> None:
+    """Refuse to start if the F1 fail-safe is waived without an explicit ack.
+
+    ``require_hw_watchdog: false`` removes the software readback gate; if the
+    Pi-level hardware watchdog is also absent, a process death with a relay
+    latched has no automatic release. A one-line waiver should not silently
+    take on that risk, so we require a second, deliberate acknowledgement key.
+    """
+    if cfg.io.driver not in ("adam", "hybrid"):
+        return
+    if cfg.io.adam.require_hw_watchdog:
+        return
+    if cfg.io.adam.i_understand_no_crash_backstop:
+        return
+    raise ConfigError(
+        "io.adam.require_hw_watchdog is false (F1 hardware fail-safe waived) "
+        "but io.adam.i_understand_no_crash_backstop is not set. With the "
+        "readback gate waived there is no automatic release if this Pi dies "
+        "with a relay latched — only the §5.1 cable-pull test. To proceed, "
+        "either set require_hw_watchdog: true (recommended) or explicitly set "
+        "i_understand_no_crash_backstop: true to accept the procedural-only "
+        "fail-safe. See HARDWARE.md §5."
+    )
 
 
 def _warn_if_default_unit_id(cfg) -> None:
@@ -217,6 +242,7 @@ async def _amain(args: argparse.Namespace) -> int:
     )
     cfg = load_config(args.config)
     log.info("atspi v%s starting (unit_id=%d)", __version__, cfg.site.unit_id)
+    _enforce_hw_watchdog_waiver(cfg)
     _warn_if_default_unit_id(cfg)
 
     driver = _build_io_driver(cfg)
@@ -272,7 +298,9 @@ async def _amain(args: argparse.Namespace) -> int:
         port=cfg.modbus_server.port,
         unit_id=cfg.modbus_server.unit_id,
         store=store,
-        on_read=watchdog.note_modbus_read,
+        # Scope the comms-loss watchdog to GenWatch's (the commanding)
+        # connection rather than re-arming on any client's reads (C-1, §8.3).
+        watchdog=watchdog,
         on_command=on_command,
     )
 

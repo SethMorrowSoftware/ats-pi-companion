@@ -1,0 +1,39 @@
+# ATS-Pi — stable symlink for the USB-to-RS485 adapter (ASCO Group 5 link).
+#
+# When installed at /etc/udev/rules.d/99-atspi-serial.rules, the Waveshare
+# USB-to-RS485 adapter gets symlinked to
+#   /dev/atspi-asco
+# regardless of which /dev/ttyUSB<n> slot Linux assigns it. RAW /dev/ttyUSB0 is
+# NOT stable across reboot / re-plug / a second USB-serial device — after a
+# power cut the adapter can come up as ttyUSB1, the hybrid driver loses ASCO
+# position sensing, raises INPUT_FAULT, and GenWatch silently falls back to the
+# less-accurate H-100-derived load source. Point io.asco_serial.port at
+# /dev/atspi-asco (the config default) so that can't happen.
+#
+# Apply without rebooting:
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+# Confirm:
+#   ls -l /dev/atspi-asco        # → ../ttyUSBn
+#
+# Find your adapter's VID:PID with `lsusb` while it's plugged in; the Waveshare
+# "USB TO RS485" ships with either an FTDI FT232 or a WCH CH340/CH343. The
+# common IDs are listed below — add a line if yours differs.
+#
+# IMPORTANT: if this Pi ever has TWO USB-serial adapters, VID:PID is ambiguous —
+# key on the per-device serial instead, e.g.:
+#   SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", \
+#     ATTRS{serial}=="<from `udevadm info -a -n /dev/ttyUSB0`>", \
+#     SYMLINK+="atspi-asco", MODE="0660", GROUP="dialout"
+
+# WCH CH340 / CH341 / CH343 (common on Waveshare USB-RS485)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="atspi-asco", MODE="0660", GROUP="dialout"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="5523", SYMLINK+="atspi-asco", MODE="0660", GROUP="dialout"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d4", SYMLINK+="atspi-asco", MODE="0660", GROUP="dialout"
+
+# FTDI FT232 / FT231X / FT232H (other Waveshare variants)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", SYMLINK+="atspi-asco", MODE="0660", GROUP="dialout"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6015", SYMLINK+="atspi-asco", MODE="0660", GROUP="dialout"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6014", SYMLINK+="atspi-asco", MODE="0660", GROUP="dialout"
+
+# Silicon Labs CP210x (some Waveshare isolated variants)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="atspi-asco", MODE="0660", GROUP="dialout"

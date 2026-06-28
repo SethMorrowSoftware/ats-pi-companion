@@ -10,9 +10,11 @@ holds no state.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import Callable
+from typing import TYPE_CHECKING, Protocol
 
 from pymodbus.datastore import (
     ModbusSequentialDataBlock,
@@ -20,6 +22,7 @@ from pymodbus.datastore import (
     ModbusSlaveContext,
 )
 from pymodbus.server import StartAsyncTcpServer
+from pymodbus.server.async_io import ModbusServerRequestHandler, ModbusTcpServer
 
 from .state import (
     ADDR_CMD_BYPASS_DELAY,
@@ -29,6 +32,9 @@ from .state import (
     CommandIntent,
     RegisterStore,
 )
+
+if TYPE_CHECKING:
+    from .safety import SafetyWatchdog
 
 log = logging.getLogger("atspi.server")
 
@@ -176,6 +182,126 @@ def _make_data_block(
     return LiveDataBlock(0, [0] * 0x0200)
 
 
+class _WatchdogProto(Protocol):
+    """The slice of SafetyWatchdog the connection tracker drives."""
+
+    def note_modbus_read(self) -> None: ...
+    def note_commander_lost(self) -> None: ...
+
+
+# The four command registers (0x0100–0x0103). A holding write into this band is
+# how GenWatch drives the switch — diagnostic tools only read — so it is the
+# signal we use to identify the authoritative connection.
+_CMD_ADDR_LO = ADDR_CMD_TEST
+_CMD_ADDR_HI = ADDR_CMD_BYPASS_DELAY
+
+
+class ConnectionTracker:
+    """Scopes the comms-loss watchdog to GenWatch's connection (ICD §3/§8.3).
+
+    The ICD names GenWatch's single persistent connection as the authoritative
+    one; the ATS-Pi may accept other connections (diagnostic tools) but must
+    not treat them as GenWatch. The naive watchdog re-armed on *any* read, so a
+    `modpoll` loop, a scanner, or a stale second GenWatch could indefinitely
+    suppress the auto-release of a latched force-transfer/inhibit — defeating
+    the central safety rule.
+
+    We identify the authoritative connection as **the one that issues command
+    writes**: only GenWatch commands the switch (diagnostic tools read). From
+    then on, only that connection's activity re-arms the watchdog; reads from
+    any other connection are ignored. A drop of the commanding connection
+    triggers an immediate release.
+
+    Before any command has ever been issued there is nothing to protect, so any
+    activity re-arms (prevents a spurious release at startup).
+
+    Connection identity is the per-connection request-handler instance (one per
+    TCP connection in pymodbus); it is used only as an opaque key.
+    """
+
+    _HOLDING_WRITE_FCS = frozenset([0x06, 0x10])
+
+    def __init__(self, watchdog: _WatchdogProto):
+        self._watchdog = watchdog
+        self._commander: object | None = None
+
+    def note_request(self, conn: object, function_code: int | None,
+                     address: int | None) -> None:
+        is_cmd_write = (
+            function_code in self._HOLDING_WRITE_FCS
+            and address is not None
+            and _CMD_ADDR_LO <= address <= _CMD_ADDR_HI
+        )
+        if is_cmd_write:
+            # Whoever commands the switch is, by definition, authoritative.
+            if conn is not self._commander:
+                self._commander = conn
+                log.info("authoritative (commanding) connection established")
+            self._watchdog.note_modbus_read()
+        elif self._commander is None:
+            # No command issued yet → nothing to protect; stay armed off any
+            # activity so the watchdog can't fire before GenWatch asserts.
+            self._watchdog.note_modbus_read()
+        elif conn is self._commander:
+            self._watchdog.note_modbus_read()
+        # else: a read from a non-commanding connection — ignored (the fix).
+
+    def note_disconnect(self, conn: object) -> None:
+        if conn is self._commander:
+            self._commander = None
+            log.warning("commanding connection dropped — releasing per ICD §8.3")
+            self._watchdog.note_commander_lost()
+
+
+def _make_tracking_handler(tracker: ConnectionTracker):
+    """Build a per-connection request handler that feeds the tracker.
+
+    pymodbus instantiates one handler per TCP connection, so the handler
+    instance *is* the connection identity. ``_async_execute`` runs for every
+    decoded request (it has both the connection — ``self`` — and the request's
+    function code/address), and ``callback_disconnected`` fires on close.
+    """
+
+    class _TrackingRequestHandler(ModbusServerRequestHandler):
+        async def _async_execute(self, request, *addr):  # noqa: ANN001
+            try:
+                tracker.note_request(
+                    self,
+                    getattr(request, "function_code", None),
+                    getattr(request, "address", None),
+                )
+            except Exception:  # never let tracking break request handling
+                log.exception("connection tracker note_request failed")
+            return await super()._async_execute(request, *addr)
+
+        def callback_disconnected(self, exc) -> None:  # noqa: ANN001
+            try:
+                tracker.note_disconnect(self)
+            except Exception:  # never let tracking break teardown
+                log.exception("connection tracker note_disconnect failed")
+            super().callback_disconnected(exc)
+
+    return _TrackingRequestHandler
+
+
+def _make_tracking_server(context, address, tracker: ConnectionTracker):
+    """ModbusTcpServer that hands out tracking request handlers.
+
+    pymodbus exposes no public hook to supply a custom handler, but the server
+    creates each one via ``callback_new_connection`` — overriding that is the
+    supported-enough injection point (pinned to pymodbus 3.7.x).
+    """
+    handler_cls = _make_tracking_handler(tracker)
+
+    class _TrackingTcpServer(ModbusTcpServer):
+        def callback_new_connection(self):
+            return handler_cls(self)
+
+    # Default framer for ModbusTcpServer is FramerType.SOCKET (MBAP) — the ICD
+    # transport. address is (host, port).
+    return _TrackingTcpServer(context, address=address)
+
+
 async def start_server(
     host: str,
     port: int,
@@ -183,23 +309,44 @@ async def start_server(
     store: RegisterStore,
     on_read: Callable[[], None] | None = None,
     on_command: Callable[[CommandIntent], None] | None = None,
+    watchdog: SafetyWatchdog | None = None,
 ) -> asyncio.Task:
     """Start the Modbus TCP server as a background task. Returns the
     task handle so the caller can cancel it during shutdown.
+
+    When ``watchdog`` is supplied, the server scopes the comms-loss watchdog to
+    GenWatch's (the commanding) connection via :class:`ConnectionTracker`, so a
+    diagnostic reader on a second connection cannot keep maintained commands
+    alive (ICD §8.3). ``on_read`` is the legacy data-block-level hook used by
+    tests; production passes ``watchdog`` instead.
     """
     block = _make_data_block(store, on_read, on_command)
     slave = _GuardedSlaveContext(hr=block, ir=block, store=store)
     context = ModbusServerContext(slaves={unit_id: slave}, single=False)
 
-    async def _serve():
-        try:
-            await StartAsyncTcpServer(context=context, address=(host, port))
-        except asyncio.CancelledError:
-            log.info("Modbus server cancelled")
-            raise
-        except Exception as e:  # noqa: BLE001
-            log.exception("Modbus server crashed: %s", e)
-            raise
+    if watchdog is not None:
+        tracker = ConnectionTracker(watchdog)
+        server = _make_tracking_server(context, (host, port), tracker)
+
+        async def _serve():
+            try:
+                # Mirrors StartAsyncTcpServer/_serverList.run (serve_forever
+                # with CancelledError suppressed) but with our handler class.
+                with contextlib.suppress(asyncio.CancelledError):
+                    await server.serve_forever()
+            except Exception as e:  # noqa: BLE001
+                log.exception("Modbus server crashed: %s", e)
+                raise
+    else:
+        async def _serve():
+            try:
+                await StartAsyncTcpServer(context=context, address=(host, port))
+            except asyncio.CancelledError:
+                log.info("Modbus server cancelled")
+                raise
+            except Exception as e:  # noqa: BLE001
+                log.exception("Modbus server crashed: %s", e)
+                raise
 
     log.info("Modbus TCP server starting on %s:%d (unit_id=%d)", host, port, unit_id)
     task = asyncio.create_task(_serve(), name="modbus-server")

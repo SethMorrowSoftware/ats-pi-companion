@@ -36,6 +36,11 @@ io:
     debounce_samples: 3         # ~300 ms; raise on an electrically noisy site
     assumed_mode: auto          # auto = all commands allowed; 'manual' = inhibit-only
     require_hw_watchdog: false  # 6060: F1 = cable-pull, not software readback
+    i_understand_no_crash_backstop: true  # required ack for the waiver above:
+                                # accepts that a Pi process death with a relay
+                                # latched has no automatic release — only the
+                                # §5.1 cable-pull test (+ the Pi-level hardware
+                                # watchdog from system.conf.d/10-atspi-hwwatchdog)
 
 # ─── Site identity (GenWatch's expected_unit_id MUST equal site.unit_id) ──
 site:

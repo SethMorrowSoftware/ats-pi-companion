@@ -149,6 +149,32 @@ def test_24h_count_evicts_old_entries(monkeypatch):
     assert store.read_register(ADDR_TRANSFER_COUNT_LIFETIME + 1) == 2
 
 
+async def test_lifetime_increment_is_durable_before_it_is_served(tmp_path, monkeypatch):
+    """M-4: the transfer_count_lifetime increment must reach disk BEFORE it is
+    observable, even on a running event loop.
+
+    Routine persists are offloaded to the loop executor (non-blocking). The
+    lifetime increment is durability-critical (ICD §8.2 monotonicity): if the
+    bumped count is served to GenWatch but a power cut hits before the async
+    fsync lands, the post-reboot count goes backwards. So the increment is
+    persisted synchronously — on disk by the time apply_input_snapshot returns,
+    with no executor round-trip awaited.
+    """
+    sf = StateFile(tmp_path / "state.json")
+    monkeypatch.setattr(time, "time", lambda: 1_700_000_000)
+    store = RegisterStore(state_file=sf)
+
+    store.apply_input_snapshot(_inputs(position="utility"))
+    # Transfer to generator → lifetime bumps to 1. We are on a running loop
+    # (async test), so the OLD code would have offloaded the write and the file
+    # would still read 0 here. With the sync critical-persist it is already 1.
+    store.apply_input_snapshot(_inputs(position="generator"))
+
+    assert store.read_register(ADDR_TRANSFER_COUNT_LIFETIME + 1) == 1
+    # Read straight from disk with no await — proves the fsync already happened.
+    assert sf.load().transfer_count_lifetime == 1
+
+
 def test_24h_count_survives_restart_within_window(tmp_path, monkeypatch):
     """B7: the 24h sliding-window timestamps persist across restarts so
     a service restart for an unrelated reason doesn't zero the counter.

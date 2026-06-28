@@ -39,8 +39,20 @@ StateDirectoryMode=0750
 # If you deploy from a venv, point this at the venv's bin/atspi.
 ExecStart=/usr/local/bin/atspi --config /etc/atspi/config.yaml
 
-Restart=on-failure
+# Reliability: this is an unattended SAFETY device (it physically commands the
+# ATS). A permanently-`failed` unit — the command/monitoring service silently
+# offline — is more dangerous than a slow restart loop, so:
+#   Restart=always           restart on clean exits too, not just failures
+#   StartLimitIntervalSec=0  DISABLE systemd's start rate limiter, which would
+#                            otherwise latch the unit in `failed` after >5
+#                            crashes/10s and require an on-site `reset-failed`
+#                            (see RUNBOOK §"unit stuck in failed").
+# A kernel/USB wedge that a restart can't fix is covered by the Pi-level
+# hardware watchdog (system.conf.d/10-atspi-hwwatchdog.conf), which resets the
+# whole Pi; the ADAM host-watchdog (F1) releases the relays in the meantime.
+Restart=always
 RestartSec=5
+StartLimitIntervalSec=0
 
 # Sandboxing — minimal privileges. The goal is that even a code-execution
 # compromise in pymodbus can't escape the unit, can't write outside the
@@ -63,10 +75,30 @@ RestrictNamespaces=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
 LockPersonality=true
-MemoryDenyWriteExecute=true
+# MemoryDenyWriteExecute is intentionally NOT set. It blocks W^X memory, which
+# some CPython builds / wheels (and any cffi/ctypes JIT path) allocate, causing
+# a SIGSYS crash-loop discovered only on the target Pi. This is the service that
+# physically commands the switch — an unexpected hard-fail here is high
+# consequence — so we match GenWatch and rely on the syscall allowlist +
+# NoNewPrivileges instead. Re-enable only after validating it on the exact
+# Raspberry Pi OS Python build during commissioning (BENCH.md).
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
+
+# Bias the OOM killer away from us — losing the device that commands the ATS
+# during memory pressure on the Pi is worse than losing anything else competing.
+# -200 puts us well behind every default-priority process ("kill me last").
+OOMScoreAdjust=-200
+
+# Resource caps. MemoryHigh is a soft throttle (reclaim pressure) hit first;
+# MemoryMax is the hard OOM-kill backstop — a leak gets throttled and logged
+# rather than abruptly killing the service (which, with Restart=always, would
+# crash-loop). The companion is lean (no DB, no web UI), so the caps are tight.
+MemoryHigh=192M
+MemoryMax=384M
+TasksMax=64
+LimitNOFILE=1024
 
 # Logging — journal-friendly
 StandardOutput=journal

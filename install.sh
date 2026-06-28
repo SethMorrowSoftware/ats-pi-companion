@@ -74,10 +74,27 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip setuptools wheel \
   || die "failed to bootstrap pip/setuptools/wheel in the venv"
-# Non-editable install: the code is copied into the venv (world-readable),
-# so the service works regardless of where this checkout lives or its perms.
-say "Installing atspi from $REPO_DIR"
-"$VENV_DIR/bin/pip" install --quiet "$REPO_DIR" || die "pip install failed"
+# Dependencies come from the hash-pinned lockfile so the two Pis and every
+# re-image get byte-identical, tamper-evident wheels (a supply-chain
+# substitution fails the hash check). Regenerate after a dependency change:
+#   pip-compile --generate-hashes -o requirements.lock pyproject.toml
+LOCK="$REPO_DIR/requirements.lock"
+if [ -f "$LOCK" ]; then
+  say "Installing pinned dependencies (--require-hashes) from requirements.lock"
+  "$VENV_DIR/bin/pip" install --quiet --require-hashes -r "$LOCK" \
+    || die "pinned dependency install failed (hash mismatch or offline?)"
+  # --no-deps: deps already came from the lock; don't let the package pull
+  # unpinned transitive versions.
+  say "Installing atspi (no-deps) from $REPO_DIR"
+  "$VENV_DIR/bin/pip" install --quiet --no-deps "$REPO_DIR" || die "pip install failed"
+elif [ "${ATSPI_ALLOW_UNPINNED:-0}" = "1" ]; then
+  warn "requirements.lock not found — installing UNPINNED (ATSPI_ALLOW_UNPINNED=1)."
+  "$VENV_DIR/bin/pip" install --quiet "$REPO_DIR" || die "pip install failed"
+else
+  die "requirements.lock not found — refusing to install without hash-pinned deps. \
+Regenerate it (pip-compile --generate-hashes -o requirements.lock pyproject.toml) \
+or set ATSPI_ALLOW_UNPINNED=1 to override (not recommended for production)."
+fi
 ATSPI_BIN="$VENV_DIR/bin/atspi"
 [ -x "$ATSPI_BIN" ] || die "atspi binary missing at $ATSPI_BIN after install"
 say "Installed $("$ATSPI_BIN" --version)"
@@ -98,6 +115,70 @@ say "Installing systemd unit → $UNIT_DST"
 sed "s|^ExecStart=.*|ExecStart=$ATSPI_BIN --config $CONFIG_FILE|" \
   "$REPO_DIR/systemd/atspi.service" > "$UNIT_DST"
 systemctl daemon-reload
+
+# ── 6. udev rule: stable /dev/atspi-asco symlink for the USB-RS485 adapter ───
+# Raw /dev/ttyUSB<n> is not stable across reboot/re-plug; without this the
+# hybrid driver can lose ASCO sensing after a power cut. Harmless for the
+# TCP-only 'adam' driver.
+UDEV_SRC="$REPO_DIR/udev/99-atspi-serial.rules"
+UDEV_DST="/etc/udev/rules.d/99-atspi-serial.rules"
+if [ -f "$UDEV_SRC" ]; then
+  say "Installing udev rule → $UDEV_DST (stable /dev/atspi-asco symlink)"
+  install -m 0644 "$UDEV_SRC" "$UDEV_DST"
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules 2>/dev/null || warn "udevadm reload failed; re-plug or reboot to apply"
+    udevadm trigger --subsystem-match=tty 2>/dev/null || true
+  fi
+  if [ -e /dev/atspi-asco ]; then
+    say "Serial adapter present at /dev/atspi-asco → $(readlink -f /dev/atspi-asco 2>/dev/null || echo '?')"
+  else
+    warn "No /dev/atspi-asco yet — plug in the Waveshare adapter, or run 'lsusb'"
+    warn "  to find its VID:PID and add a matching line to $UDEV_DST (driver: hybrid only)."
+  fi
+fi
+
+# ── 7. Pi-level hardware watchdog (resets the Pi on a kernel/USB hang) ────────
+# The software watchdog (atspi.service WatchdogSec) can't restart pid 1. This
+# drop-in tells systemd to pet the SoC watchdog so a kernel deadlock hard-resets
+# the Pi. The ADAM host-watchdog (F1) releases the relays in the interim.
+HWWDT_SRC="$REPO_DIR/systemd/system.conf.d/10-atspi-hwwatchdog.conf"
+HWWDT_DST="/etc/systemd/system.conf.d/10-atspi-hwwatchdog.conf"
+if [ -f "$HWWDT_SRC" ]; then
+  say "Installing hardware-watchdog drop-in → $HWWDT_DST"
+  mkdir -p /etc/systemd/system.conf.d
+  install -m 0644 "$HWWDT_SRC" "$HWWDT_DST"
+  # Apply manager config without rebooting. daemon-reexec re-reads system.conf.d.
+  systemctl daemon-reexec || warn "daemon-reexec failed; reboot to arm the watchdog"
+  ARMED="$(systemctl show -p RuntimeWatchdogUSec --value 2>/dev/null || echo '')"
+  if [ -n "$ARMED" ] && [ "$ARMED" != "0" ] && [ "$ARMED" != "infinity" ]; then
+    say "Hardware watchdog armed (RuntimeWatchdogUSec=$ARMED)"
+  else
+    warn "Hardware watchdog NOT armed yet (RuntimeWatchdogUSec=${ARMED:-unset})."
+    warn "  Verify /dev/watchdog exists (bcm2835_wdt) and reboot; check with 'wdctl'."
+  fi
+else
+  warn "hw-watchdog drop-in not found at $HWWDT_SRC — skipping (Pi won't self-reset on a kernel hang)"
+fi
+
+# ── 8. Time sync (ICD §9.4/§11: <5 s skew is a hard contract) ────────────────
+# Both Pis must agree on wall-clock to <5 s or GenWatch raises TIME_SKEW, and
+# the persistent transfer timestamps depend on a correct clock. The Pi has no
+# battery RTC, so after a power cut it boots at a wrong time until NTP corrects
+# it. Enable a time-sync service and report sync status.
+if command -v timedatectl >/dev/null 2>&1; then
+  say "Enabling NTP time sync (timedatectl set-ntp true)"
+  timedatectl set-ntp true 2>/dev/null || warn "could not enable NTP via timedatectl"
+  systemctl enable --now systemd-timesyncd 2>/dev/null || true
+  if timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -qx yes; then
+    say "Clock is NTP-synchronized"
+  else
+    warn "Clock NOT yet NTP-synchronized. On an air-gapped OT VLAN with no"
+    warn "  upstream NTP server, point one Pi (or the site router) at the other"
+    warn "  per ICD §11, or GenWatch will raise persistent TIME_SKEW alarms."
+  fi
+else
+  warn "timedatectl not found — ensure NTP/chrony keeps this Pi within 5 s of GenWatch (ICD §11)."
+fi
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 say "Install complete — the service is installed but NOT started (by design)."

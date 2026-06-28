@@ -37,16 +37,34 @@ class SafetyWatchdog:
         # silence interval (one release per timeout event, not per
         # check tick).
         self._released: bool = False
+        # Set when the *commanding* connection (GenWatch) drops — forces an
+        # immediate release on the next tick rather than waiting out the full
+        # silence window (ICD §9.1: a TCP drop is unambiguous comms loss).
+        # Cleared by note_modbus_read when activity resumes.
+        self._commander_gone: bool = False
 
     def note_modbus_read(self) -> None:
-        """Called by the Modbus server's data block on every successful
-        read. Cheap and frequent; do nothing expensive here.
+        """Called for a successful Modbus read FROM THE AUTHORITATIVE
+        (GenWatch) connection — see server.ConnectionTracker, which scopes
+        this so a diagnostic reader on a second connection can't keep the
+        watchdog alive (ICD §3/§8.3). Cheap and frequent; nothing expensive.
         """
         self._last_read_monotonic = time.monotonic()
+        self._commander_gone = False
         if self._released:
             # Comms recovered — re-arm
             log.info("comms recovered; watchdog re-armed")
             self._released = False
+
+    def note_commander_lost(self) -> None:
+        """Called when the authoritative GenWatch connection drops.
+
+        A dropped TCP connection is unambiguous comms loss: the operator who
+        asserted a maintained command can no longer release it remotely, so we
+        must not wait out the full 30 s silence window. The next tick releases.
+        Harmless no-op if nothing is asserted.
+        """
+        self._commander_gone = True
 
     def snapshot(self) -> tuple[float, bool]:
         """Return ``(seconds_since_last_modbus_read, released)``.
@@ -68,11 +86,17 @@ class SafetyWatchdog:
             except asyncio.CancelledError:
                 return
             elapsed = time.monotonic() - self._last_read_monotonic
-            if elapsed > TIMEOUT_S and not self._released:
+            commander_gone = self._commander_gone
+            if (elapsed > TIMEOUT_S or commander_gone) and not self._released:
+                reason = (
+                    "commanding connection dropped"
+                    if commander_gone and elapsed <= TIMEOUT_S
+                    else f"silent for {elapsed:.1f}s (> {TIMEOUT_S:.1f}s)"
+                )
                 log.warning(
-                    "Modbus comms silent for %.1fs (> %.1fs) — auto-releasing "
-                    "maintained commands per ICD §8.3",
-                    elapsed, TIMEOUT_S,
+                    "Modbus comms %s — auto-releasing maintained commands "
+                    "per ICD §8.3",
+                    reason,
                 )
                 # Release in the store (so read-back registers reflect
                 # the release immediately) AND drive the physical

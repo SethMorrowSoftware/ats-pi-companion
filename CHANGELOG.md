@@ -9,6 +9,56 @@ package version — see `atspi.ICD_VERSION` for the wire-protocol version.
 
 ## [Unreleased]
 
+### Fixed / hardened (post-audit safety pass, 2026-06)
+
+- **CRITICAL (C-1): the comms-loss auto-release is now scoped to GenWatch's
+  connection (ICD §3/§8.3).** The watchdog previously re-armed on *any*
+  successful Modbus read, so a diagnostic `modpoll`, a scanner, or a stale
+  second GenWatch on a separate connection could indefinitely suppress the
+  30 s auto-release of a latched force-transfer/inhibit. A `ConnectionTracker`
+  now identifies the authoritative connection as the one that issues command
+  writes (only GenWatch commands the switch; diagnostic tools read) — only that
+  connection's activity re-arms the watchdog, and a drop of that connection
+  triggers an immediate release. No wire-protocol change (ICD v1.0 unchanged).
+  New end-to-end tests (`test_c1_connection_scoping.py`) prove a busy
+  diagnostic reader cannot keep a latched command alive.
+- **Transfer-count durability (M-4, ICD §8.2).** The `transfer_count_lifetime`
+  increment is now persisted **synchronously** before the bumped value becomes
+  observable over Modbus. Previously the count was published to the read
+  registers while the fsync was offloaded to the loop executor, so a power cut
+  in that window left the post-reboot count one lower than GenWatch last saw —
+  a backwards jump that violates the monotonicity contract. Routine (non-count)
+  persists are still offloaded.
+- **F1 fail-safe waiver now requires an explicit second acknowledgement (H-1).**
+  Setting `io.adam.require_hw_watchdog: false` removes the only software gate on
+  driving outputs; combined with a process death it can strand a latched relay.
+  The service now refuses to start unless `io.adam.i_understand_no_crash_backstop:
+  true` is also set — a one-line waiver can no longer silently remove the
+  crash-time backstop. `config.production.example.yaml` sets the ack (the 6060's
+  FSV/WDT isn't Modbus-readable).
+- **Pi-level hardware watchdog (H-1).** Added
+  `systemd/system.conf.d/10-atspi-hwwatchdog.conf` (and `install.sh` deploys +
+  verifies it) so a kernel/USB hang hard-resets the Pi — the software watchdog
+  can't restart pid 1. The companion is the device that physically commands the
+  switch and previously had no Pi-level watchdog (GenWatch did).
+- **Stable serial device path (H-6).** Added `udev/99-atspi-serial.rules`
+  (deployed + reloaded by `install.sh`) creating a stable `/dev/atspi-asco`
+  symlink for the Waveshare USB-RS485 adapter; the config default is now that
+  symlink, not a raw `/dev/ttyUSB0` that moves across reboot/re-plug and
+  silently broke ASCO sensing.
+- **Hash-pinned dependencies (H-7).** Added `requirements.lock` (pip-compile
+  `--generate-hashes`); `install.sh` installs deps with `--require-hashes` and
+  the package `--no-deps`, and refuses to install without the lock (override
+  with `ATSPI_ALLOW_UNPINNED=1`). The two Pis and every re-image now get
+  byte-identical, tamper-evident wheels.
+- **NTP enforced at install (M-3).** `install.sh` enables time sync and reports
+  sync status — the ICD <5 s skew is a hard contract and the Pi has no RTC.
+- **systemd unit hardened (M-1, M-2).** `Restart=always` +
+  `StartLimitIntervalSec=0` (an unattended safety device must never latch in
+  `failed` requiring on-site `reset-failed`); `OOMScoreAdjust=-200` and memory/
+  task/fd caps; and `MemoryDenyWriteExecute` removed (it can SIGSYS-crash some
+  CPython builds — re-enable only after validating on the target image).
+
 ### Added (hybrid / serial commissioning — the Waveshare RS-485 path is now deployable)
 
 - **The `driver: hybrid` path (ADAM-6060 control + ASCO Group 5 read over a

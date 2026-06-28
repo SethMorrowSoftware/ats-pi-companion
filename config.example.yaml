@@ -99,7 +99,10 @@ io:
     # watchdog enabled, timeout in the 5–10 s band, every DO safety value OFF.
     #
     # Set require_hw_watchdog: false ONLY as an explicit, auditable waiver for
-    # bench work (atspi-bench already waives it internally).
+    # bench work (atspi-bench already waives it internally). When you do, the
+    # service ALSO requires i_understand_no_crash_backstop: true (below) or it
+    # refuses to start — a second, deliberate ack that you accept the
+    # procedural-only fail-safe.
     #
     # ADAM-6060 NOTE: bench validation found the 6060 does NOT expose its
     # FSV/watchdog config over Modbus (BENCH.md §10 finding 4), so this
@@ -108,6 +111,14 @@ io:
     # gate (NEXTSTEPS.md Stage 2) — and re-run that test after any ADAM swap
     # or factory reset, because nothing in software will warn you.
     require_hw_watchdog: true
+
+    # Second, explicit acknowledgement required to run with require_hw_watchdog:
+    # false. Leave false unless you are deliberately waiving the F1 readback gate
+    # (e.g. the ADAM-6060, whose FSV/WDT isn't Modbus-readable) AND accept that a
+    # Pi process death with a relay latched has no automatic release — only the
+    # §5.1 cable-pull test. With require_hw_watchdog: false and this left false,
+    # the service refuses to start.
+    i_understand_no_crash_backstop: false
 
     # Register addresses for that readback. These are BENCH-VERIFY and left
     # UNSET below: pull them from the ADAM-6000 Series User Manual (Appendix B,
@@ -134,8 +145,10 @@ io:
   asco_serial:
     # Serial link. 8N1 is fixed by ASCO doc 381339-221 (RTU mode only). Set the
     # controller's RS485 address + baud on its front panel (General →
-    # Communication) and match them here. 'port' is the USB-RS485 adapter.
-    port: /dev/ttyUSB0
+    # Communication) and match them here. 'port' is the USB-RS485 adapter —
+    # use the STABLE /dev/atspi-asco symlink (udev/99-atspi-serial.rules, which
+    # install.sh deploys), NOT a raw /dev/ttyUSB0 that moves across reboots.
+    port: /dev/atspi-asco
     baudrate: 19200
     bytesize: 8
     parity: "N"
